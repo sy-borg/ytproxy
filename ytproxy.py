@@ -23,6 +23,7 @@ Examples:
 import subprocess
 from flask import Flask, request, Response, abort
 import yt_dlp
+import os
 
 app = Flask(__name__)
 
@@ -145,4 +146,6 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    HOST = os.getenv("YTPROXY_HOST", "0.0.0.0")
+    PORT = int(os.getenv("YTPROXY_PORT", "8080"))
+    app.run(host=HOST, port=PORT, threaded=True)

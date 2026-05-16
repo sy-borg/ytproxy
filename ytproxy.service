@@ -1,0 +1,21 @@
+[Unit]
+Description=YouTube Streaming Proxy
+After=network.target
+
+[Service]
+Type=simple
+
+Environment=YTPROXY_PORT=8090
+ExecStart=/usr/bin/ytproxy
+
+Restart=on-failure
+RestartSec=5
+
+# Optional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
