@@ -28,6 +28,7 @@ Videos per channel:
 
 import argparse
 import yt_dlp
+from datetime import datetime
 
 
 def normalize_channel(line: str) -> str | None:
@@ -96,11 +97,25 @@ def get_latest_videos(channel_url: str, limit: int, proxy_base=None):
                     proxy_base
                 )
 
+                upload_date = entry.get("upload_date")
+
+                date_str = ""
+                timestamp = 0
+
+                if upload_date:
+                    # yt-dlp format: YYYYMMDD
+                    dt = datetime.strptime(upload_date, "%Y%m%d")
+
+                    date_str = dt.strftime("%Y-%m-%d")
+                    timestamp = int(dt.timestamp())
+
                 videos.append({
                     "title": title,
                     "url": video_url,
                     "thumbnail": thumbnail,
                     "channel": channel,
+                    "date": date_str,
+                    "timestamp": timestamp,
                 })
 
     except Exception as e:
@@ -117,8 +132,10 @@ def write_m3u(videos, output_file):
             extinf = (
                 '#EXTINF:-1 '
                 f'tvg-logo="{video["thumbnail"]}" '
+                f'tvg-date="{video["date"]}" '
+                f'tvg-timestamp="{video["timestamp"]}" '
                 f'group-title="{video["channel"]}",'
-                f'{video["title"]}'
+                f'[{video["date"]}] {video["title"]}'
             )
 
             f.write(extinf + "\n")
@@ -179,6 +196,10 @@ def main():
 
         all_videos.extend(videos)
 
+    all_videos.sort(
+        key=lambda v: v["timestamp"],
+        reverse=True
+    )
     write_m3u(all_videos, args.output_file)
 
 
