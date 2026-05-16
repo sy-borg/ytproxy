@@ -69,7 +69,8 @@ def fetch_channel_videos(channel_name, count=5):
 
     ydl_opts = {
         "quiet": True,
-        "extract_flat": True,
+        "extract_flat": False,
+#        "extract_flat": True,
         "playlistend": count,
         "skip_download": True,
     }
@@ -146,6 +147,7 @@ def fetch_channel_videos(channel_name, count=5):
 @app.route("/channel/<channel>.m3u")
 def playlist(channel):
     count = int(request.args.get("count", 5))
+    base_url = request.host_url
 
     def generate():
         yield "#EXTM3U\n"
@@ -158,7 +160,7 @@ def playlist(channel):
 
             for video in videos:
                 stream_url = (
-                    f"{request.host_url}"
+                    f"{base_url}"
                     f"watch?v={video['id']}"
                 )
 
