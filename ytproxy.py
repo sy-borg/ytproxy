@@ -69,7 +69,6 @@ def fetch_channel_videos(channel_name, count=5):
     ydl_opts = {
         "quiet": True,
         "extract_flat": False,
-#        "extract_flat": True,
         "playlistend": count,
         "skip_download": True,
     }

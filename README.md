@@ -2,6 +2,14 @@
 
 YouTube proxy to integrate channels into media servers like emby.
 
+Totally vibe coded!
+
+## License
+
+MIT
+
+## Usage
+
 1. Generate playlist
 `http://localhost:8080/channel/<channel>.m3u?count=<count>`
 
