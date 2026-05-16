@@ -21,12 +21,11 @@ Examples:
 """
 
 import subprocess
-from flask import Flask, request, Response, abort
-from flask import Response
-from datetime import datetime
 import time
-import yt_dlp
 import os
+from datetime import datetime
+from flask import Flask, request, Response, abort
+import yt_dlp
 
 app = Flask(__name__)
 
