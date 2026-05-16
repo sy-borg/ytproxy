@@ -33,7 +33,10 @@ def get_stream_url(video_id):
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "best[ext=mp4]/best",
+        # progressive stream preferred
+        "format": (
+            "bestvideo+bestaudio/best"
+        ),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
