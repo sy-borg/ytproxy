@@ -1,0 +1,20 @@
+[Unit]
+Description=Update YouTube IPTV playlist
+
+[Service]
+Type=oneshot
+
+ExecStart=/usr/bin/youtube-channels-to-m3u \
+    /etc/ytproxy/channels.txt \
+    /var/lib/ytproxy/youtube.m3u \
+    --count 5 \
+    --proxy http://localhost:8090
+
+# Optional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+# Needed because we write to /var/lib/ytproxy
+ReadWritePaths=/var/lib/ytproxy
