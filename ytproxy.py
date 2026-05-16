@@ -22,10 +22,171 @@ Examples:
 
 import subprocess
 from flask import Flask, request, Response, abort
+from flask import Response
+from datetime import datetime
+import time
 import yt_dlp
 import os
 
 app = Flask(__name__)
+
+
+# ------------------------------------------------------------
+# Cache
+# ------------------------------------------------------------
+
+CHANNEL_CACHE = {}
+CACHE_TIME = 600  # seconds
+
+
+# ------------------------------------------------------------
+# Fetch videos
+# ------------------------------------------------------------
+
+def fetch_channel_videos(channel_name, count=5):
+    now = time.time()
+
+    cache_key = f"{channel_name}:{count}"
+
+    # Return cached result if still valid
+    if cache_key in CHANNEL_CACHE:
+        cached = CHANNEL_CACHE[cache_key]
+
+        if now - cached["time"] < CACHE_TIME:
+            print(f"CACHE HIT: {channel_name}")
+
+            return cached["videos"]
+
+    print(f"CACHE MISS: {channel_name}")
+
+    # Support both:
+    #   Computerphile
+    #   @Computerphile
+    if not channel_name.startswith("@"):
+        channel_name = "@" + channel_name
+
+    url = f"https://www.youtube.com/{channel_name}/videos"
+
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "playlistend": count,
+        "skip_download": True,
+    }
+
+    videos = []
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    for entry in info.get("entries", []):
+        if not entry:
+            continue
+
+        video_id = entry.get("id")
+
+        if not video_id:
+            continue
+
+        upload_date = entry.get("upload_date")
+
+        date_str = ""
+        timestamp = 0
+
+        if upload_date:
+            try:
+                dt = datetime.strptime(
+                    upload_date,
+                    "%Y%m%d"
+                )
+
+                date_str = dt.strftime("%Y-%m-%d")
+                timestamp = int(dt.timestamp())
+
+            except Exception:
+                pass
+
+        thumbnail = (
+            entry.get("thumbnail")
+            or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        )
+
+        channel = (
+            entry.get("channel")
+            or channel_name.lstrip("@")
+        )
+
+        videos.append({
+            "id": video_id,
+            "title": entry.get("title", "Untitled"),
+            "thumbnail": thumbnail,
+            "channel": channel,
+            "date": date_str,
+            "timestamp": timestamp,
+        })
+
+    videos.sort(
+        key=lambda v: v["timestamp"],
+        reverse=True
+    )
+
+    # Store cache
+    CHANNEL_CACHE[cache_key] = {
+        "time": now,
+        "videos": videos,
+    }
+
+    return videos
+
+
+# ------------------------------------------------------------
+# Dynamic playlist endpoint
+# ------------------------------------------------------------
+
+@app.route("/channel/<channel>.m3u")
+def playlist(channel):
+    count = int(request.args.get("count", 5))
+
+    def generate():
+        yield "#EXTM3U\n"
+
+        try:
+            videos = fetch_channel_videos(
+                channel,
+                count
+            )
+
+            for video in videos:
+                stream_url = (
+                    f"{request.host_url}"
+                    f"watch?v={video['id']}"
+                )
+
+                visible_title = (
+                    f"[{video['date']}] "
+                    f"{video['title']}"
+                )
+
+                extinf = (
+                    '#EXTINF:-1 '
+                    f'tvg-id="youtube-{video["id"]}" '
+                    f'tvg-logo="{video["thumbnail"]}" '
+                    f'group-title="{video["channel"]}" '
+                    f'tvg-date="{video["date"]}" '
+                    f'tvg-timestamp="{video["timestamp"]}",'
+                    f'{visible_title}'
+                )
+
+                yield extinf + "\n"
+                yield stream_url + "\n"
+
+        except Exception as e:
+            yield f"# ERROR: {e}\n"
+
+    return Response(
+        generate(),
+        mimetype="audio/x-mpegurl",
+    )
 
 
 def get_stream_url(video_id):
