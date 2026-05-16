@@ -302,6 +302,9 @@ def index():
     <pre>
     /watch?v=dQw4w9WgXcQ
     /watch?v=dQw4w9WgXcQ&t=120
+
+    /channel/TechnologyConnections.m3u
+    /channel/Computerphile.m3u?count=10
     </pre>
     """
 
