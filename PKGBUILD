@@ -1,7 +1,7 @@
 # Maintainer: sa
 
 pkgname=ytproxy
-pkgver=1.0.11
+pkgver=1.0.13
 pkgrel=1
 pkgdesc="YouTube IPTV proxy"
 arch=('any')
@@ -23,6 +23,8 @@ source=(
 sha256sums=('SKIP' 'SKIP')
 
 package() {
+    install -dm755 "$pkgdir/var/lib/ytproxy"
+
     install -Dm755 ytproxy.py \
         "$pkgdir/usr/bin/ytproxy"
 

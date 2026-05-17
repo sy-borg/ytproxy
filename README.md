@@ -10,13 +10,14 @@ MIT
 
 ## Usage
 
-1. Generate playlist
+* Generate playlist
 `http://localhost:8080/channel/<channel>.m3u?count=<count>`
+`http://localhost:8080/channel/<channel>.xml?count=<count>`
 
-2. Watch video
+* Watch video
 `http://localhost:8080/watch?v=<video_id>`
 
-3. Transcode video with ffmpeg
+* Transcode video with ffmpeg
 `http://localhost:8080/transcode?v=<video_id>`
 
 ## Install

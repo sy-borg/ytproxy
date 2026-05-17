@@ -22,16 +22,205 @@ Examples:
     http://localhost:8080/transcode?v=dQw4w9WgXcQ
 """
 
+
 import subprocess
 import time
 import os
 import requests
-from datetime import datetime
 from flask import Flask, request, Response, abort
 from urllib.parse import urlparse, parse_qs
 import yt_dlp
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+import json
+from pathlib import Path
 
 app = Flask(__name__)
+
+
+# Get videos from the rss feed, otherwise from ydl
+CHANNEL_SOURCE = "rss"
+
+
+CHANNEL_ID_CACHE = {}
+CHANNEL_ID_CACHE_FILE = Path(
+    "/var/lib/ytproxy/channel_ids.json"
+)
+
+
+def load_channel_id_cache():
+    global CHANNEL_ID_CACHE
+
+    if not CHANNEL_ID_CACHE_FILE.exists():
+        return
+
+    try:
+        with open(
+            CHANNEL_ID_CACHE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            CHANNEL_ID_CACHE = json.load(f)
+
+        print(
+            f"Loaded "
+            f"{len(CHANNEL_ID_CACHE)} "
+            f"channel IDs"
+        )
+
+    except Exception as e:
+        print(
+            f"Failed to load "
+            f"channel ID cache: {e}"
+        )
+
+
+def save_channel_id_cache():
+    try:
+        CHANNEL_ID_CACHE_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        with open(
+            CHANNEL_ID_CACHE_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                CHANNEL_ID_CACHE,
+                f,
+                indent=2,
+                sort_keys=True
+            )
+
+    except Exception as e:
+        print(
+            f"Failed to save "
+            f"channel ID cache: {e}"
+        )
+
+
+def get_channel_id(channel_name):
+    if channel_name in CHANNEL_ID_CACHE:
+        print(f"CHANNEL_ID_CACHE HIT: {channel_name}")
+        return CHANNEL_ID_CACHE[channel_name]
+
+    print(f"CHANNEL_ID_CACHE MISS: {channel_name}")
+
+    if not channel_name.startswith("@"):
+        channel_name_at = "@" + channel_name
+
+    url = f"https://www.youtube.com/{channel_name_at}"
+
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "skip_download": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(
+            url,
+            download=False
+        )
+
+    channel_id = info.get("channel_id")
+
+    if not channel_id:
+        raise RuntimeError(
+            f"Could not resolve channel ID for {channel_name}"
+        )
+
+    CHANNEL_ID_CACHE[channel_name] = channel_id
+
+    save_channel_id_cache()
+
+    return channel_id
+
+
+def fetch_channel_videos_rss(channel_name, count=5):
+    now = time.time()
+
+    cache_key = f"{channel_name}:{count}"
+
+    # Return cached result if still valid
+    if cache_key in CHANNEL_CACHE:
+        cached = CHANNEL_CACHE[cache_key]
+
+        if now - cached["time"] < CACHE_TIME:
+            print(f"CHANNEL_CACHE HIT: {channel_name}")
+
+            return cached["videos"]
+
+    print(f"CHANNEL_CACHE MISS: {channel_name}")
+
+    channel_id = get_channel_id(channel_name)
+
+    rss_url = (
+        "https://www.youtube.com/feeds/videos.xml"
+        f"?channel_id={channel_id}"
+    )
+
+    response = requests.get(rss_url)
+
+    response.raise_for_status()
+
+    root = ET.fromstring(response.text)
+
+    ns = {
+        "": "http://www.w3.org/2005/Atom",
+        "yt": "http://www.youtube.com/xml/schemas/2015",
+        "media": "http://search.yahoo.com/mrss/",
+    }
+
+    videos = []
+
+    for entry in root.findall("entry", ns)[:count]:
+        video_id = entry.find("yt:videoId", ns).text
+
+        title = entry.find("title", ns).text
+
+        published = entry.find(
+            "published",
+            ns
+        ).text
+
+        dt = datetime.fromisoformat(
+            published.replace("Z", "+00:00")
+        )
+
+        timestamp = int(dt.timestamp())
+
+        date_str = dt.strftime("%Y-%m-%d")
+
+        thumbnail = (
+            f"https://i.ytimg.com/vi/"
+            f"{video_id}/hqdefault.jpg"
+        )
+
+        videos.append({
+            "id": video_id,
+            "title": title,
+            "thumbnail": thumbnail,
+            "channel": channel_name.lstrip("@"),
+            "date": date_str,
+            "timestamp": timestamp,
+            "duration": -1,
+        })
+
+    videos.sort(
+        key=lambda v: v["timestamp"],
+        reverse=True
+    )
+
+    # Store cache
+    CHANNEL_CACHE[cache_key] = {
+        "time": now,
+        "videos": videos,
+    }
+
+    return videos
 
 
 # ------------------------------------------------------------
@@ -56,7 +245,7 @@ DEFAULT_STREAM_CACHE_TIME = 1800
 # Fetch videos
 # ------------------------------------------------------------
 
-def fetch_channel_videos(channel_name, count=5):
+def fetch_channel_videos_ydl(channel_name, count=5):
     now = time.time()
 
     cache_key = f"{channel_name}:{count}"
@@ -66,11 +255,11 @@ def fetch_channel_videos(channel_name, count=5):
         cached = CHANNEL_CACHE[cache_key]
 
         if now - cached["time"] < CACHE_TIME:
-            print(f"CACHE HIT: {channel_name}")
+            print(f"CHANNEL_CACHE HIT: {channel_name}")
 
             return cached["videos"]
 
-    print(f"CACHE MISS: {channel_name}")
+    print(f"CHANNEL_CACHE MISS: {channel_name}")
 
     # Support both:
     #   Computerphile
@@ -155,6 +344,12 @@ def fetch_channel_videos(channel_name, count=5):
     return videos
 
 
+def fetch_channel_videos(channel_name, count=5):
+    if CHANNEL_SOURCE == "rss":
+        return fetch_channel_videos_rss(channel_name, count)
+    return fetch_channel_videos_ydl(channel_name, count)
+
+
 # ------------------------------------------------------------
 # Dynamic playlist endpoint
 # ------------------------------------------------------------
@@ -206,6 +401,108 @@ def playlist(channel):
     )
 
 
+@app.route("/channel/<channel>.xml")
+def channel_xml(channel):
+    count = int(request.args.get("count", 5))
+
+    base_url = request.host_url.rstrip("/")
+
+    def generate():
+        yield '<?xml version="1.0" encoding="UTF-8"?>\n'
+
+        yield (
+            '<rss version="2.0" '
+            'xmlns:media="http://search.yahoo.com/mrss/">\n'
+        )
+
+        yield "<channel>\n"
+
+        yield f"<title>{channel}</title>\n"
+
+        yield (
+            f"<link>"
+            f"{base_url}/channel/{channel}.xml"
+            f"</link>\n"
+        )
+
+        yield (
+            f"<description>"
+            f"YouTube channel feed for {channel}"
+            f"</description>\n"
+        )
+
+        try:
+            videos = fetch_channel_videos(
+                channel,
+                count
+            )
+
+            for video in videos:
+                stream_url = (
+                    f"{base_url}/watch?v={video['id']}"
+                )
+
+                thumbnail = video["thumbnail"]
+                pub_date = datetime.fromtimestamp(
+                    video['timestamp'],
+                    timezone.utc
+                ).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+                yield "<item>\n"
+
+                yield (
+                    f"<title><![CDATA["
+                    f"{video['title']}"
+                    f"]]></title>\n"
+                )
+
+                yield (
+                    f"<link>{stream_url}</link>\n"
+                )
+
+                yield (
+                    f"<guid>{video['id']}</guid>\n"
+                )
+
+                yield (
+                    f"<pubDate>"
+                    f"{pub_date}"
+                    f"</pubDate>\n"
+                )
+
+                yield (
+                    f'<media:thumbnail '
+                    f'url="{thumbnail}" />\n'
+                )
+
+                yield (
+                    f'<media:content '
+                    f'url="{stream_url}" '
+                    f'type="video/mp4" />\n'
+                )
+
+                if video["duration"] > 0:
+                    yield (
+                        f'<media:content '
+                        f'duration="{video["duration"]}" />\n'
+                    )
+
+                yield "</item>\n"
+
+        except Exception as e:
+            yield (
+                f"<error><![CDATA[{e}]]></error>\n"
+            )
+
+        yield "</channel>\n"
+        yield "</rss>\n"
+
+    return Response(
+        generate(),
+        mimetype="application/rss+xml",
+    )
+
+
 # ------------------------------------------------------------
 # Cached stream URL resolver
 # ------------------------------------------------------------
@@ -221,15 +518,15 @@ def get_stream_url(video_id):
 
     if cached:
         if cached["expires"] > now:
-            print(f"STREAM CACHE HIT: {video_id}")
+            print(f"STREAM_CACHE HIT: {video_id}")
 
             return cached["url"]
 
-        print(f"STREAM CACHE EXPIRED: {video_id}")
+        print(f"STREAM_CACHE EXPIRED: {video_id}")
 
         del STREAM_CACHE[video_id]
 
-    print(f"STREAM CACHE MISS: {video_id}")
+    print(f"STREAM_CACHE MISS: {video_id}")
 
     # --------------------------------------------------------
     # Resolve via yt-dlp
@@ -440,4 +737,6 @@ def index():
 if __name__ == "__main__":
     HOST = os.getenv("YTPROXY_HOST", "0.0.0.0")
     PORT = int(os.getenv("YTPROXY_PORT", "8080"))
+    CHANNEL_SOURCE = os.getenv("YTPROXY_SOURCE", "rss")
+    load_channel_id_cache()
     app.run(host=HOST, port=PORT, threaded=True)
