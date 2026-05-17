@@ -28,6 +28,7 @@ import os
 import requests
 from datetime import datetime
 from flask import Flask, request, Response, abort
+from urllib.parse import urlparse, parse_qs
 import yt_dlp
 
 app = Flask(__name__)
@@ -39,6 +40,16 @@ app = Flask(__name__)
 
 CHANNEL_CACHE = {}
 CACHE_TIME = 600  # seconds
+
+
+# ------------------------------------------------------------
+# Stream URL cache
+# ------------------------------------------------------------
+
+STREAM_CACHE = {}
+
+# fallback if expire= is missing
+DEFAULT_STREAM_CACHE_TIME = 1800
 
 
 # ------------------------------------------------------------
@@ -195,39 +206,99 @@ def playlist(channel):
     )
 
 
+# ------------------------------------------------------------
+# Cached stream URL resolver
+# ------------------------------------------------------------
+
 def get_stream_url(video_id):
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    now = time.time()
+
+    # --------------------------------------------------------
+    # Cache hit
+    # --------------------------------------------------------
+
+    cached = STREAM_CACHE.get(video_id)
+
+    if cached:
+        if cached["expires"] > now:
+            print(f"STREAM CACHE HIT: {video_id}")
+
+            return cached["url"]
+
+        print(f"STREAM CACHE EXPIRED: {video_id}")
+
+        del STREAM_CACHE[video_id]
+
+    print(f"STREAM CACHE MISS: {video_id}")
+
+    # --------------------------------------------------------
+    # Resolve via yt-dlp
+    # --------------------------------------------------------
+
+    youtube_url = (
+        f"https://www.youtube.com/watch?v={video_id}"
+    )
 
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        # progressive stream preferred
+
+        # Prefer progressive streams
         "format": (
-            "bestvideo+bestaudio/best"
+            "best[acodec!=none][vcodec!=none]"
         ),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(youtube_url, download=False)
+        info = ydl.extract_info(
+            youtube_url,
+            download=False
+        )
 
-    if info.get("url"):
-        return info["url"]
+    stream_url = info.get("url")
 
-    formats = info.get("formats", [])
+    if not stream_url:
+        raise RuntimeError(
+            "No usable stream URL found"
+        )
 
-    for fmt in reversed(formats):
-        url = fmt.get("url")
+    # --------------------------------------------------------
+    # Determine expiry time
+    # --------------------------------------------------------
 
-        if not url:
-            continue
+    expires = now + DEFAULT_STREAM_CACHE_TIME
 
-        if (
-            fmt.get("vcodec") != "none"
-            and fmt.get("acodec") != "none"
-        ):
-            return url
+    try:
+        parsed = urlparse(stream_url)
 
-    raise RuntimeError("No usable stream found")
+        query = parse_qs(parsed.query)
+
+        # YouTube usually includes:
+        # expire=1715975592
+        if "expire" in query:
+            expires = int(query["expire"][0])
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # Store cache
+    # --------------------------------------------------------
+
+    STREAM_CACHE[video_id] = {
+        "url": stream_url,
+        "expires": expires,
+    }
+
+    ttl = int(expires - now)
+
+    print(
+        f"STREAM CACHE STORE: "
+        f"{video_id} "
+        f"(TTL {ttl}s)"
+    )
+
+    return stream_url
 
 
 @app.route("/transcode")

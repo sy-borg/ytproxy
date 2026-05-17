@@ -16,6 +16,9 @@ MIT
 2. Watch video
 `http://localhost:8080/watch?v=<video_id>`
 
+3. Transcode video with ffmpeg
+`http://localhost:8080/transcode?v=<video_id>`
+
 ## Install
 
 ~~~sh
