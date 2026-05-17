@@ -180,7 +180,7 @@ def playlist(channel):
                 )
 
                 visible_title = (
-                    f"[{video['date']}] "
+                    #f"[{video['date']}] "
                     f"{video['title']}"
                 )
 
