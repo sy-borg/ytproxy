@@ -16,13 +16,16 @@ Usage:
     python3 ytproxy.py
 
 Examples:
+    http://localhost:8080/channel/TechnologyConnections.m3u?count=10
     http://localhost:8080/watch?v=dQw4w9WgXcQ
     http://localhost:8080/watch?v=dQw4w9WgXcQ&t=120
+    http://localhost:8080/transcode?v=dQw4w9WgXcQ
 """
 
 import subprocess
 import time
 import os
+import requests
 from datetime import datetime
 from flask import Flask, request, Response, abort
 import yt_dlp
@@ -115,6 +118,8 @@ def fetch_channel_videos(channel_name, count=5):
             or channel_name.lstrip("@")
         )
 
+        duration = entry.get("duration") or -1
+
         videos.append({
             "id": video_id,
             "title": entry.get("title", "Untitled"),
@@ -122,6 +127,7 @@ def fetch_channel_videos(channel_name, count=5):
             "channel": channel,
             "date": date_str,
             "timestamp": timestamp,
+            "duration": duration,
         })
 
     videos.sort(
@@ -168,7 +174,7 @@ def playlist(channel):
                 )
 
                 extinf = (
-                    '#EXTINF:-1 '
+                    f'#EXTINF:{video["duration"]} '
                     f'tvg-id="youtube-{video["id"]}" '
                     f'tvg-logo="{video["thumbnail"]}" '
                     f'group-title="{video["channel"]}" '
@@ -224,8 +230,10 @@ def get_stream_url(video_id):
     raise RuntimeError("No usable stream found")
 
 
-@app.route("/watch")
-def watch():
+@app.route("/transcode")
+def transcode():
+    # stream chunked MPEG-TS with ffmpeg
+
     video_id = request.args.get("v")
 
     if not video_id:
@@ -293,6 +301,52 @@ def watch():
     )
 
 
+@app.route("/watch")
+def watch():
+    # directly proxy the original YouTube stream URL
+
+    video_id = request.args.get("v")
+
+    if not video_id:
+        abort(400, "Missing ?v=VIDEO_ID")
+
+    try:
+        stream_url = get_stream_url(video_id)
+
+    except Exception as e:
+        abort(500, f"yt-dlp error: {e}")
+
+    headers = {}
+
+    # Forward range requests
+    if "Range" in request.headers:
+        headers["Range"] = request.headers["Range"]
+
+    upstream = requests.get(
+        stream_url,
+        headers=headers,
+        stream=True,
+    )
+
+    excluded = {
+        "content-encoding",
+        "transfer-encoding",
+        "connection",
+    }
+
+    response_headers = {
+        k: v
+        for k, v in upstream.headers.items()
+        if k.lower() not in excluded
+    }
+
+    return Response(
+        upstream.iter_content(64 * 1024),
+        status=upstream.status_code,
+        headers=response_headers,
+    )
+
+
 @app.route("/")
 def index():
     return """
@@ -302,6 +356,9 @@ def index():
     <pre>
     /watch?v=dQw4w9WgXcQ
     /watch?v=dQw4w9WgXcQ&t=120
+
+    /transcode?v=dQw4w9WgXcQ
+    /transcode?v=dQw4w9WgXcQ&t=120
 
     /channel/TechnologyConnections.m3u
     /channel/Computerphile.m3u?count=10

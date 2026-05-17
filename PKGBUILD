@@ -1,11 +1,11 @@
 # Maintainer: sa
 
 pkgname=ytproxy
-pkgver=1.0.9
+pkgver=1.0.10
 pkgrel=1
 pkgdesc="YouTube IPTV proxy"
 arch=('any')
-url="https://example.com/ytproxy"
+url="https://codeberg.org/trill/ytproxy"
 license=('MIT')
 
 depends=(

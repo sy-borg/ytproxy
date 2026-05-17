@@ -5,6 +5,7 @@ After=network.target
 [Service]
 Type=simple
 
+Environment=YTPROXY_HOST=127.0.0.1
 Environment=YTPROXY_PORT=8090
 ExecStart=/usr/bin/ytproxy
 

@@ -1,6 +1,6 @@
 # ytproxy
 
-YouTube proxy to integrate channels into media servers like emby.
+YouTube proxy to integrate channels into media servers like emby, Jellyfin.
 
 Totally vibe coded!
 
