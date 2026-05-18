@@ -34,6 +34,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 app = Flask(__name__)
 
@@ -139,6 +140,14 @@ def get_channel_id(channel_name):
     return channel_id
 
 
+def get_channel_meta(channel_name, count=5):
+    cache_key = f"{channel_name}:{count}"
+    if cache_key in CHANNEL_CACHE:
+        cached = CHANNEL_CACHE[cache_key]
+        return cached["channel"]
+    return None
+
+
 def fetch_channel_videos_rss(channel_name, count=5):
     now = time.time()
 
@@ -174,12 +183,23 @@ def fetch_channel_videos_rss(channel_name, count=5):
         "media": "http://search.yahoo.com/mrss/",
     }
 
+    channel = {}
+    channel["id"] = channel_id
+    channel["title"] = title = root.find("title", ns).text
+    author = root.find("author", ns)
+    if author is not None:
+        channel["author:name"] = author.find("name", ns).text
+        channel["author:uri"] = author.find("uri", ns).text
+
     videos = []
 
     for entry in root.findall("entry", ns)[:count]:
         video_id = entry.find("yt:videoId", ns).text
 
-        title = entry.find("title", ns).text
+        media_group = entry.find("media:group", ns)
+
+        title = media_group.find("media:title", ns).text
+        description = media_group.find("media:description", ns).text
 
         published = entry.find(
             "published",
@@ -203,6 +223,7 @@ def fetch_channel_videos_rss(channel_name, count=5):
             "id": video_id,
             "title": title,
             "thumbnail": thumbnail,
+            "description": description,
             "channel": channel_name.lstrip("@"),
             "date": date_str,
             "timestamp": timestamp,
@@ -218,6 +239,7 @@ def fetch_channel_videos_rss(channel_name, count=5):
     CHANNEL_CACHE[cache_key] = {
         "time": now,
         "videos": videos,
+        "channel": channel
     }
 
     return videos
@@ -355,7 +377,7 @@ def fetch_channel_videos(channel_name, count=5):
 # ------------------------------------------------------------
 
 @app.route("/channel/<channel>.m3u")
-def playlist(channel):
+def channel_m3u(channel):
     count = int(request.args.get("count", 5))
     base_url = request.host_url
 
@@ -411,13 +433,9 @@ def channel_xml(channel):
         yield '<?xml version="1.0" encoding="UTF-8"?>\n'
 
         yield (
-            '<rss version="2.0" '
-            'xmlns:media="http://search.yahoo.com/mrss/">\n'
+            '<feed version="2.0" '
+            'xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">\n'
         )
-
-        yield "<channel>\n"
-
-        yield f"<title>{channel}</title>\n"
 
         yield (
             f"<link>"
@@ -425,17 +443,21 @@ def channel_xml(channel):
             f"</link>\n"
         )
 
-        yield (
-            f"<description>"
-            f"YouTube channel feed for {channel}"
-            f"</description>\n"
-        )
-
         try:
             videos = fetch_channel_videos(
                 channel,
                 count
             )
+
+            channel_meta = get_channel_meta(channel, count)
+            if channel_meta is not None:
+                yield f'<id>yt:channel:{channel_meta["id"]}</id>\n'
+                yield f'<title>{channel_meta["title"]}</title>\n'
+
+                yield "<author>\n"
+                yield f'<name>{channel_meta["author:name"]}</name>\n'
+                yield f'<uri>{channel_meta["author:uri"]}.xml</uri>\n'
+                yield "</author>\n"
 
             for video in videos:
                 stream_url = (
@@ -446,60 +468,40 @@ def channel_xml(channel):
                 pub_date = datetime.fromtimestamp(
                     video['timestamp'],
                     timezone.utc
-                ).strftime("%a, %d %b %Y %H:%M:%S GMT")
+                ).isoformat()
 
-                yield "<item>\n"
+                yield "<entry>\n"
+                yield f"<id>yt:video:{video['id']}</id>\n"
+                yield f"<yt:videoId>{video['id']}</yt:videoId>\n"
 
-                yield (
-                    f"<title><![CDATA["
-                    f"{video['title']}"
-                    f"]]></title>\n"
-                )
+                title = escape(video['title'])
+                yield f"<title>{title}</title>\n"
 
-                yield (
-                    f"<link>{stream_url}</link>\n"
-                )
+                yield f'<link rel="alternate" href="{stream_url}" />\n'
 
-                yield (
-                    f"<guid>{video['id']}</guid>\n"
-                )
+                yield f"<published>{pub_date}</published>\n"
 
-                yield (
-                    f"<pubDate>"
-                    f"{pub_date}"
-                    f"</pubDate>\n"
-                )
-
-                yield (
-                    f'<media:thumbnail '
-                    f'url="{thumbnail}" />\n'
-                )
-
-                yield (
-                    f'<media:content '
-                    f'url="{stream_url}" '
-                    f'type="video/mp4" />\n'
-                )
+                yield "<media:group>\n"
+                yield f"<media:title>{title}</media:title>\n"
+                yield f'<media:thumbnail url="{thumbnail}" />\n'
+                yield f'<media:content url="{stream_url}" type="video/mp4" />\n'
+                if video['description']:
+                    yield f'<media:description><![CDATA[{video['description']}]]>"</media:description>\n'
 
                 if video["duration"] > 0:
-                    yield (
-                        f'<media:content '
-                        f'duration="{video["duration"]}" />\n'
-                    )
+                    yield f'<media:content duration="{video["duration"]}" />\n'
+                yield "</media:group>\n"
 
-                yield "</item>\n"
+                yield "</entry>\n"
 
         except Exception as e:
-            yield (
-                f"<error><![CDATA[{e}]]></error>\n"
-            )
+            yield f"<error><![CDATA[{e}]]></error>\n"
 
-        yield "</channel>\n"
-        yield "</rss>\n"
+        yield "</feed>\n"
 
     return Response(
         generate(),
-        mimetype="application/rss+xml",
+        mimetype="text/xml",
     )
 
 

@@ -26,11 +26,19 @@ MIT
 $ makepkg -si
 ~~~
 
+To run it at boot:
 ~~~sh
 $ sudo systemctl enable --now ytproxy.service
+~~~
+
+## Run
+
+~~~sh
+$ python3 ytproxy.py
 ~~~
 
 ## Environment
 
 * `YTPROXY_HOST`
 * `YTPROXY_PORT`
+* `YTPROXY_SOURCE` Where to get the channel videos from, `rss` (fast, less detail) or else with yt-dlp (slow)
