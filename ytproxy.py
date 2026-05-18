@@ -140,8 +140,8 @@ def get_channel_id(channel_name):
     return channel_id
 
 
-def get_channel_meta(channel_name, count=5):
-    cache_key = f"{channel_name}:{count}"
+def get_channel_meta(channel_name, count=5, include_shorts=False):
+    cache_key = f"{channel_name}:{count}:{include_shorts}"
     if cache_key in CHANNEL_CACHE:
         cached = CHANNEL_CACHE[cache_key]
         return cached["channel"]
@@ -151,7 +151,7 @@ def get_channel_meta(channel_name, count=5):
 def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
     now = time.time()
 
-    cache_key = f"{channel_name}:{count}"
+    cache_key = f"{channel_name}:{count}:{include_shorts}"
 
     # Return cached result if still valid
     if cache_key in CHANNEL_CACHE:
@@ -185,7 +185,8 @@ def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
 
     channel = {}
     channel["id"] = channel_id
-    channel["title"] = title = root.find("title", ns).text
+    channel["title"] = root.find("title", ns).text
+    channel["published"] = root.find("published", ns).text
     author = root.find("author", ns)
     if author is not None:
         channel["author:name"] = author.find("name", ns).text
@@ -276,7 +277,7 @@ DEFAULT_STREAM_CACHE_TIME = 1800
 def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
     now = time.time()
 
-    cache_key = f"{channel_name}:{count}"
+    cache_key = f"{channel_name}:{count}:{include_shorts}"
 
     # Return cached result if still valid
     if cache_key in CHANNEL_CACHE:
@@ -304,10 +305,14 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
         "skip_download": True,
     }
 
-    videos = []
-
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
+
+    channel = {}
+    channel["id"] = info.get("id")
+    channel["title"] = info.get("channel") or channel_name.lstrip("@")
+
+    videos = []
 
     for entry in info.get("entries", []):
         if not entry:
@@ -352,18 +357,13 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
             or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
         )
 
-        channel = (
-            entry.get("channel")
-            or channel_name.lstrip("@")
-        )
-
         duration = entry.get("duration") or -1
 
         videos.append({
             "id": video_id,
             "title": entry.get("title", "Untitled"),
             "thumbnail": thumbnail,
-            "channel": channel,
+            "channel": channel["title"],
             "date": date_str,
             "timestamp": timestamp,
             "duration": duration,
@@ -378,6 +378,7 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
     CHANNEL_CACHE[cache_key] = {
         "time": now,
         "videos": videos,
+        "channel": channel,
     }
 
     return videos
@@ -385,8 +386,8 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
 
 def fetch_channel_videos(channel_name, count=5, include_shorts=False):
     if CHANNEL_SOURCE == "rss":
-        return fetch_channel_videos_rss(channel_name, count)
-    return fetch_channel_videos_ydl(channel_name, count)
+        return fetch_channel_videos_rss(channel_name, count, include_shorts)
+    return fetch_channel_videos_ydl(channel_name, count, include_shorts)
 
 
 # ------------------------------------------------------------
@@ -461,11 +462,7 @@ def channel_xml(channel):
             'xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">\n'
         )
 
-        yield (
-            f"<link>"
-            f"{base_url}/channel/{channel}.xml"
-            f"</link>\n"
-        )
+        yield f'<link rel="self" href="{base_url}/channel/{channel}.xml" />'
 
         try:
             videos = fetch_channel_videos(
@@ -474,15 +471,22 @@ def channel_xml(channel):
                 include_shorts
             )
 
-            channel_meta = get_channel_meta(channel, count)
+            channel_meta = get_channel_meta(channel, count, include_shorts)
             if channel_meta is not None:
+                yield f'<link rel="alternate" href="https://www.youtube.com/channel/{channel_meta["id"]}"/>'
+                channel_title = escape(channel_meta["title"])
                 yield f'<id>yt:channel:{channel_meta["id"]}</id>\n'
-                yield f'<title>{channel_meta["title"]}</title>\n'
+                yield f'<yt:channelId>{channel_meta["id"]}</yt:channelId>\n'
+                yield f'<title>{channel_title}</title>\n'
+                if "published" in channel_meta:
+                    yield f'<published>{channel_meta["published"]}</published>\n'
 
-                yield "<author>\n"
-                yield f'<name>{channel_meta["author:name"]}</name>\n'
-                yield f'<uri>{channel_meta["author:uri"]}.xml</uri>\n'
-                yield "</author>\n"
+                if "author:name" in channel_meta:
+                    channel_author_name = escape(channel_meta["author:name"])
+                    yield "<author>\n"
+                    yield f'<name>{channel_author_name}</name>\n'
+                    yield f'<uri>{channel_meta["author:uri"]}</uri>\n'
+                    yield "</author>\n"
 
             for video in videos:
                 stream_url = (
@@ -510,10 +514,10 @@ def channel_xml(channel):
                 yield f"<media:title>{title}</media:title>\n"
                 yield f'<media:thumbnail url="{thumbnail}" />\n'
                 yield f'<media:content url="{stream_url}" type="video/mp4" />\n'
-                if video['description']:
+                if 'description' in video:
                     yield f'<media:description><![CDATA[{video['description']}]]>"</media:description>\n'
 
-                if video["duration"] > 0:
+                if "duration" in video and video["duration"] > 0:
                     yield f'<media:content duration="{video["duration"]}" />\n'
                 yield "</media:group>\n"
 
@@ -569,6 +573,7 @@ def get_stream_url(video_id):
 
         # Prefer progressive streams
         "format": (
+            #"bestvideo+bestaudio/best"
             "best[acodec!=none][vcodec!=none]"
         ),
     }
