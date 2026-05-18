@@ -13,6 +13,7 @@ MIT
 * Generate playlist
 `http://localhost:8080/channel/<channel>.m3u?count=<count>`
 `http://localhost:8080/channel/<channel>.xml?count=<count>`
+`http://localhost:8080/channel/<channel>.xml?shorts=1`
 
 * Watch video
 `http://localhost:8080/watch?v=<video_id>`

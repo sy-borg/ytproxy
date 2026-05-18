@@ -148,7 +148,7 @@ def get_channel_meta(channel_name, count=5):
     return None
 
 
-def fetch_channel_videos_rss(channel_name, count=5):
+def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
     now = time.time()
 
     cache_key = f"{channel_name}:{count}"
@@ -194,6 +194,12 @@ def fetch_channel_videos_rss(channel_name, count=5):
     videos = []
 
     for entry in root.findall("entry", ns)[:count]:
+        video_link = entry.find("link", ns).attrib["href"]
+        if not include_shorts:
+            # Skip Shorts
+            if "/shorts/" in video_link:
+                continue
+
         video_id = entry.find("yt:videoId", ns).text
 
         media_group = entry.find("media:group", ns)
@@ -267,7 +273,7 @@ DEFAULT_STREAM_CACHE_TIME = 1800
 # Fetch videos
 # ------------------------------------------------------------
 
-def fetch_channel_videos_ydl(channel_name, count=5):
+def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
     now = time.time()
 
     cache_key = f"{channel_name}:{count}"
@@ -306,6 +312,17 @@ def fetch_channel_videos_ydl(channel_name, count=5):
     for entry in info.get("entries", []):
         if not entry:
             continue
+
+        if not include_shorts:
+            video_url = (
+                entry.get("webpage_url")
+                or entry.get("url")
+                or ""
+            )
+
+            # Filter Shorts
+            if "/shorts/" in video_url:
+                continue
 
         video_id = entry.get("id")
 
@@ -366,7 +383,7 @@ def fetch_channel_videos_ydl(channel_name, count=5):
     return videos
 
 
-def fetch_channel_videos(channel_name, count=5):
+def fetch_channel_videos(channel_name, count=5, include_shorts=False):
     if CHANNEL_SOURCE == "rss":
         return fetch_channel_videos_rss(channel_name, count)
     return fetch_channel_videos_ydl(channel_name, count)
@@ -379,6 +396,9 @@ def fetch_channel_videos(channel_name, count=5):
 @app.route("/channel/<channel>.m3u")
 def channel_m3u(channel):
     count = int(request.args.get("count", 5))
+    include_shorts = (
+        request.args.get("shorts", "0") == "1"
+    )
     base_url = request.host_url
 
     def generate():
@@ -387,7 +407,8 @@ def channel_m3u(channel):
         try:
             videos = fetch_channel_videos(
                 channel,
-                count
+                count,
+                include_shorts
             )
 
             for video in videos:
@@ -426,6 +447,9 @@ def channel_m3u(channel):
 @app.route("/channel/<channel>.xml")
 def channel_xml(channel):
     count = int(request.args.get("count", 5))
+    include_shorts = (
+        request.args.get("shorts", "0") == "1"
+    )
 
     base_url = request.host_url.rstrip("/")
 
@@ -446,7 +470,8 @@ def channel_xml(channel):
         try:
             videos = fetch_channel_videos(
                 channel,
-                count
+                count,
+                include_shorts
             )
 
             channel_meta = get_channel_meta(channel, count)
