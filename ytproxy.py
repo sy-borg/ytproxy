@@ -49,6 +49,87 @@ CHANNEL_ID_CACHE_FILE = Path(
 )
 
 
+# ------------------------------------------------------------
+# Channel Cache
+# ------------------------------------------------------------
+
+CHANNEL_CACHE = {}
+CHANNEL_CACHE_TIME = 600  # seconds
+CHANNEL_CACHE_DIR = Path(
+    "/var/lib/ytproxy/channels"
+)
+
+
+def get_channel_cache_file(channel_name, count, include_shorts):
+    safe_channel = (
+        channel_name.lstrip("@").replace("/", "_")
+    )
+
+    return (
+        CHANNEL_CACHE_DIR / f"{safe_channel}_{count}_{include_shorts}.json"
+    )
+
+
+def save_channel_cache(
+    channel_name,
+    count,
+    include_shorts,
+    videos,
+    channel
+):
+    try:
+        CHANNEL_CACHE_DIR.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        cache_file = get_channel_cache_file(
+            channel_name,
+            count,
+            include_shorts
+        )
+
+        payload = {
+            "time": time.time(),
+            "videos": videos,
+            "channel": channel,
+        }
+
+        with open(
+            cache_file,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(payload, f)
+
+    except Exception as e:
+        print(f"Failed to save channel cache: {e}")
+
+
+def load_channel_cache(channel_name, count, include_shorts):
+    try:
+        cache_file = get_channel_cache_file(
+            channel_name,
+            count,
+            include_shorts
+        )
+
+        if not cache_file.exists():
+            return None
+
+        with open(
+            cache_file,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
+
+    except Exception as e:
+        print(f"Failed to load channel cache: {e}")
+
+    return None
+
+
 def load_channel_id_cache():
     global CHANNEL_ID_CACHE
 
@@ -63,17 +144,10 @@ def load_channel_id_cache():
         ) as f:
             CHANNEL_ID_CACHE = json.load(f)
 
-        print(
-            f"Loaded "
-            f"{len(CHANNEL_ID_CACHE)} "
-            f"channel IDs"
-        )
+        print(f"Loaded {len(CHANNEL_ID_CACHE)} channel IDs")
 
     except Exception as e:
-        print(
-            f"Failed to load "
-            f"channel ID cache: {e}"
-        )
+        print(f"Failed to load channel ID cache: {e}")
 
 
 def save_channel_id_cache():
@@ -96,10 +170,7 @@ def save_channel_id_cache():
             )
 
     except Exception as e:
-        print(
-            f"Failed to save "
-            f"channel ID cache: {e}"
-        )
+        print(f"Failed to save channel ID cache: {e}")
 
 
 def get_channel_id(channel_name):
@@ -140,7 +211,7 @@ def get_channel_id(channel_name):
     return channel_id
 
 
-def get_channel_meta(channel_name, count=5, include_shorts=False):
+def get_channel_meta(channel_name, count, include_shorts):
     cache_key = f"{channel_name}:{count}:{include_shorts}"
     if cache_key in CHANNEL_CACHE:
         cached = CHANNEL_CACHE[cache_key]
@@ -148,7 +219,7 @@ def get_channel_meta(channel_name, count=5, include_shorts=False):
     return None
 
 
-def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
+def fetch_channel_videos_rss(channel_name, count, include_shorts):
     now = time.time()
 
     cache_key = f"{channel_name}:{count}:{include_shorts}"
@@ -157,7 +228,7 @@ def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
     if cache_key in CHANNEL_CACHE:
         cached = CHANNEL_CACHE[cache_key]
 
-        if now - cached["time"] < CACHE_TIME:
+        if now - cached["time"] < CHANNEL_CACHE_TIME:
             print(f"CHANNEL_CACHE HIT: {channel_name}")
 
             return cached["videos"]
@@ -173,7 +244,23 @@ def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
 
     response = requests.get(rss_url)
 
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except Exception as e:
+        print(f"RSS fetch failed: {e}")
+        cached = load_channel_cache(channel_name, count, include_shorts)
+
+        if cached:
+            print(f"Using stale cache for {channel_name} from {datetime.fromtimestamp(cached["time"]).strftime('%Y-%m-%d %H:%M:%S')}")
+
+            CHANNEL_CACHE[cache_key] = {
+                "time": cached["time"],
+                "videos": cached["videos"],
+                "channel": cached["channel"]
+            }
+            return cached["videos"]
+
+        raise
 
     root = ET.fromstring(response.text)
 
@@ -231,7 +318,7 @@ def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
             "title": title,
             "thumbnail": thumbnail,
             "description": description,
-            "channel": channel_name.lstrip("@"),
+            "channel": channel["title"],
             "date": date_str,
             "timestamp": timestamp,
             "duration": -1,
@@ -248,16 +335,15 @@ def fetch_channel_videos_rss(channel_name, count=5, include_shorts=False):
         "videos": videos,
         "channel": channel
     }
+    save_channel_cache(
+        channel_name,
+        count,
+        include_shorts,
+        videos,
+        channel
+    )
 
     return videos
-
-
-# ------------------------------------------------------------
-# Cache
-# ------------------------------------------------------------
-
-CHANNEL_CACHE = {}
-CACHE_TIME = 600  # seconds
 
 
 # ------------------------------------------------------------
@@ -265,16 +351,37 @@ CACHE_TIME = 600  # seconds
 # ------------------------------------------------------------
 
 STREAM_CACHE = {}
-
 # fallback if expire= is missing
 DEFAULT_STREAM_CACHE_TIME = 1800
+
+
+def cleanup_stream_cache():
+    if not hasattr(cleanup_stream_cache, "cleanup_counter"):
+        cleanup_stream_cache.cleanup_counter = 0
+
+    if cleanup_stream_cache.cleanup_counter < 10:
+        cleanup_stream_cache.cleanup_counter += 1
+        return
+    else:
+        cleanup_stream_cache.cleanup_counter = 0
+
+    print("Cleaning STREAM_CACHE")
+    now = time.time()
+
+    expired = [
+        k for k, v in STREAM_CACHE.items()
+        if v["expires"] <= now
+    ]
+
+    for k in expired:
+        del STREAM_CACHE[k]
 
 
 # ------------------------------------------------------------
 # Fetch videos
 # ------------------------------------------------------------
 
-def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
+def fetch_channel_videos_ydl(channel_name, count, include_shorts):
     now = time.time()
 
     cache_key = f"{channel_name}:{count}:{include_shorts}"
@@ -283,7 +390,7 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
     if cache_key in CHANNEL_CACHE:
         cached = CHANNEL_CACHE[cache_key]
 
-        if now - cached["time"] < CACHE_TIME:
+        if now - cached["time"] < CHANNEL_CACHE_TIME:
             print(f"CHANNEL_CACHE HIT: {channel_name}")
 
             return cached["videos"]
@@ -311,6 +418,8 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
     channel = {}
     channel["id"] = info.get("id")
     channel["title"] = info.get("channel") or channel_name.lstrip("@")
+    channel["author:name"] = info.get("uploader") or channel["title"]
+    channel["author:uri"] = info.get("channel_url") or f"https://www.youtube.com/channel/{channel["id"]}"
 
     videos = []
 
@@ -363,6 +472,7 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
             "id": video_id,
             "title": entry.get("title", "Untitled"),
             "thumbnail": thumbnail,
+            "description": entry.get("description", ""),
             "channel": channel["title"],
             "date": date_str,
             "timestamp": timestamp,
@@ -380,11 +490,18 @@ def fetch_channel_videos_ydl(channel_name, count=5, include_shorts=False):
         "videos": videos,
         "channel": channel,
     }
+    save_channel_cache(
+        channel_name,
+        count,
+        include_shorts,
+        videos,
+        channel
+    )
 
     return videos
 
 
-def fetch_channel_videos(channel_name, count=5, include_shorts=False):
+def fetch_channel_videos(channel_name, count, include_shorts):
     if CHANNEL_SOURCE == "rss":
         return fetch_channel_videos_rss(channel_name, count, include_shorts)
     return fetch_channel_videos_ydl(channel_name, count, include_shorts)
@@ -458,11 +575,12 @@ def channel_xml(channel):
         yield '<?xml version="1.0" encoding="UTF-8"?>\n'
 
         yield (
-            '<feed version="2.0" '
-            'xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">\n'
+            '<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" '
+            'xmlns:media="http://search.yahoo.com/mrss/" '
+            'xmlns="http://www.w3.org/2005/Atom">\n'
         )
 
-        yield f'<link rel="self" href="{base_url}/channel/{channel}.xml" />'
+        yield f'<link rel="self" href="{base_url}/channel/{channel}.xml" />\n'
 
         try:
             videos = fetch_channel_videos(
@@ -473,7 +591,7 @@ def channel_xml(channel):
 
             channel_meta = get_channel_meta(channel, count, include_shorts)
             if channel_meta is not None:
-                yield f'<link rel="alternate" href="https://www.youtube.com/channel/{channel_meta["id"]}"/>'
+                yield f'<link rel="alternate" href="https://www.youtube.com/channel/{channel_meta["id"]}"/>\n'
                 channel_title = escape(channel_meta["title"])
                 yield f'<id>yt:channel:{channel_meta["id"]}</id>\n'
                 yield f'<yt:channelId>{channel_meta["id"]}</yt:channelId>\n'
@@ -502,6 +620,7 @@ def channel_xml(channel):
                 yield "<entry>\n"
                 yield f"<id>yt:video:{video['id']}</id>\n"
                 yield f"<yt:videoId>{video['id']}</yt:videoId>\n"
+                yield f"<yt:channelId>{channel_meta["id"]}</yt:channelId>\n"
 
                 title = escape(video['title'])
                 yield f"<title>{title}</title>\n"
@@ -509,16 +628,19 @@ def channel_xml(channel):
                 yield f'<link rel="alternate" href="{stream_url}" />\n'
 
                 yield f"<published>{pub_date}</published>\n"
+                yield f"<updated>{pub_date}</updated>\n"
 
                 yield "<media:group>\n"
                 yield f"<media:title>{title}</media:title>\n"
                 yield f'<media:thumbnail url="{thumbnail}" />\n'
-                yield f'<media:content url="{stream_url}" type="video/mp4" />\n'
+                yield f'<media:content url="{stream_url}" type="video/mp4" '
+                if "duration" in video and video["duration"] > 0:
+                    yield f'duration="{video["duration"]}" '
+                yield "/>\n"
+
                 if 'description' in video:
                     yield f'<media:description><![CDATA[{video['description']}]]>"</media:description>\n'
 
-                if "duration" in video and video["duration"] > 0:
-                    yield f'<media:content duration="{video["duration"]}" />\n'
                 yield "</media:group>\n"
 
                 yield "</entry>\n"
@@ -614,6 +736,7 @@ def get_stream_url(video_id):
     # Store cache
     # --------------------------------------------------------
 
+    cleanup_stream_cache()
     STREAM_CACHE[video_id] = {
         "url": stream_url,
         "expires": expires,
