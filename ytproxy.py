@@ -18,8 +18,8 @@ Usage:
 Examples:
     http://localhost:8080/channel/TechnologyConnections.m3u?count=10
     http://localhost:8080/watch?v=dQw4w9WgXcQ
-    http://localhost:8080/watch?v=dQw4w9WgXcQ&t=120
     http://localhost:8080/transcode?v=dQw4w9WgXcQ
+    http://localhost:8080/transcode?v=dQw4w9WgXcQt=120
 """
 
 
@@ -37,6 +37,15 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 app = Flask(__name__)
+HTTP = requests.Session()
+# YouTube sometimes dislikes default Python requests.
+HTTP.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 "
+        "(X11; Linux x86_64) "
+        "AppleWebKit/537.36"
+    )
+})
 
 
 # Get videos from the rss feed, otherwise from ydl
@@ -180,6 +189,7 @@ def get_channel_id(channel_name):
 
     print(f"CHANNEL_ID_CACHE MISS: {channel_name}")
 
+    channel_name_at = channel_name
     if not channel_name.startswith("@"):
         channel_name_at = "@" + channel_name
 
@@ -242,7 +252,10 @@ def fetch_channel_videos_rss(channel_name, count, include_shorts):
         f"?channel_id={channel_id}"
     )
 
-    response = requests.get(rss_url)
+    response = HTTP.get(
+        rss_url,
+        timeout=15,
+    )
 
     try:
         response.raise_for_status()
@@ -254,7 +267,7 @@ def fetch_channel_videos_rss(channel_name, count, include_shorts):
             print(f"Using stale cache for {channel_name} from {datetime.fromtimestamp(cached["time"]).strftime('%Y-%m-%d %H:%M:%S')}")
 
             CHANNEL_CACHE[cache_key] = {
-                "time": cached["time"],
+                "time": now,
                 "videos": cached["videos"],
                 "channel": cached["channel"]
             }
@@ -639,7 +652,15 @@ def channel_xml(channel):
                 yield "/>\n"
 
                 if 'description' in video:
-                    yield f'<media:description><![CDATA[{video['description']}]]>"</media:description>\n'
+                    description = (
+                        video.get("description", "")
+                        .replace("]]>", "]]]]><![CDATA[>")
+                    )
+                    yield (
+                        f"<media:description><![CDATA["
+                        f"{description}"
+                        f"]]></media:description>\n"
+                    )
 
                 yield "</media:group>\n"
 
@@ -845,10 +866,11 @@ def watch():
     if "Range" in request.headers:
         headers["Range"] = request.headers["Range"]
 
-    upstream = requests.get(
+    upstream = HTTP.get(
         stream_url,
         headers=headers,
         stream=True,
+        timeout=30,
     )
 
     excluded = {
