@@ -27,6 +27,7 @@ import subprocess
 import time
 import os
 import requests
+import sys
 from flask import Flask, request, Response, abort
 from urllib.parse import urlparse, parse_qs
 import yt_dlp
@@ -567,6 +568,7 @@ def channel_m3u(channel):
                 yield stream_url + "\n"
 
         except Exception as e:
+            print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
             yield f"# ERROR: {e}\n"
 
     return Response(
@@ -651,9 +653,9 @@ def channel_xml(channel):
                     yield f'duration="{video["duration"]}" '
                 yield "/>\n"
 
-                if 'description' in video:
+                if 'description' in video and not video["description"] is None:
                     description = (
-                        video.get("description", "")
+                        video["description"]
                         .replace("]]>", "]]]]><![CDATA[>")
                     )
                     yield (
@@ -667,6 +669,7 @@ def channel_xml(channel):
                 yield "</entry>\n"
 
         except Exception as e:
+            print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
             yield f"<error><![CDATA[{e}]]></error>\n"
 
         yield "</feed>\n"
@@ -789,6 +792,7 @@ def transcode():
         stream_url = get_stream_url(video_id)
 
     except Exception as e:
+        print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
         abort(500, f"yt-dlp error: {e}")
 
     cmd = [
@@ -858,6 +862,7 @@ def watch():
         stream_url = get_stream_url(video_id)
 
     except Exception as e:
+        print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
         abort(500, f"yt-dlp error: {e}")
 
     headers = {}
