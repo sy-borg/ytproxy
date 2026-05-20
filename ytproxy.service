@@ -1,5 +1,5 @@
 [Unit]
-Description=YouTube Streaming Proxy
+Description=YouTube IPTV Proxy
 After=network.target
 
 [Service]

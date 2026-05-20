@@ -4,9 +4,8 @@
 YYouTube IPTV proxy.
 
 Features:
-- Streams YouTube videos via yt-dlp
+- Streams YouTube videos directly or via ffmpeg
 - HTTP Range support
-- Start playback at timestamp (?t=SECONDS)
 - Works with mpv/VLC/Kodi/Jellyfin/Emby
 
 Requirements:
