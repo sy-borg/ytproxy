@@ -1,6 +1,6 @@
 # ytproxy
 
-YouTube proxy to integrate channels into media servers like emby, Jellyfin.
+YouTube IPTV proxy.
 
 Totally vibe coded!
 
@@ -42,4 +42,11 @@ $ python3 ytproxy.py
 
 * `YTPROXY_HOST`
 * `YTPROXY_PORT`
-* `YTPROXY_SOURCE` Where to get the channel videos from, `rss` (fast, less detail) or else with yt-dlp (slow)
+* `YTPROXY_SOURCE` Where to get the channel videos from, `rss` (fast, less detail, unreliable) or else with yt-dlp (slow)
+
+## Requirements
+
+* python
+* python-flask
+* yt-dlp
+* ffmpeg

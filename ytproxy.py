@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-YouTube streaming proxy with seeking support.
+YYouTube IPTV proxy.
 
 Features:
 - Streams YouTube videos via yt-dlp
@@ -18,8 +18,6 @@ Usage:
 Examples:
     http://localhost:8080/channel/TechnologyConnections.m3u?count=10
     http://localhost:8080/watch?v=dQw4w9WgXcQ
-    http://localhost:8080/transcode?v=dQw4w9WgXcQ
-    http://localhost:8080/transcode?v=dQw4w9WgXcQt=120
 """
 
 
@@ -654,15 +652,8 @@ def channel_xml(channel):
                 yield "/>\n"
 
                 if 'description' in video and not video["description"] is None:
-                    description = (
-                        video["description"]
-                        .replace("]]>", "]]]]><![CDATA[>")
-                    )
-                    yield (
-                        f"<media:description><![CDATA["
-                        f"{description}"
-                        f"]]></media:description>\n"
-                    )
+                    description = escape(video["description"])
+                    yield f"<media:description>{description}</media:description>\n"
 
                 yield "</media:group>\n"
 
@@ -681,33 +672,22 @@ def channel_xml(channel):
 
 
 # ------------------------------------------------------------
-# Cached stream URL resolver
+# Cached stream info/URL resolver
 # ------------------------------------------------------------
 
-def get_stream_url(video_id):
+def get_stream_info(video_id):
     now = time.time()
-
-    # --------------------------------------------------------
-    # Cache hit
-    # --------------------------------------------------------
 
     cached = STREAM_CACHE.get(video_id)
 
     if cached:
         if cached["expires"] > now:
             print(f"STREAM_CACHE HIT: {video_id}")
-
-            return cached["url"]
-
-        print(f"STREAM_CACHE EXPIRED: {video_id}")
+            return cached
 
         del STREAM_CACHE[video_id]
 
     print(f"STREAM_CACHE MISS: {video_id}")
-
-    # --------------------------------------------------------
-    # Resolve via yt-dlp
-    # --------------------------------------------------------
 
     youtube_url = (
         f"https://www.youtube.com/watch?v={video_id}"
@@ -717,11 +697,8 @@ def get_stream_url(video_id):
         "quiet": True,
         "no_warnings": True,
 
-        # Prefer progressive streams
-        "format": (
-            #"bestvideo+bestaudio/best"
-            "best[acodec!=none][vcodec!=none]"
-        ),
+        # Best available
+        "format": "best",
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -730,95 +707,187 @@ def get_stream_url(video_id):
             download=False
         )
 
-    stream_url = info.get("url")
+    formats = info.get("formats", [])
 
-    if not stream_url:
-        raise RuntimeError(
-            "No usable stream URL found"
+    candidates = []
+
+    for fmt in formats:
+        url = fmt.get("url")
+
+        if not url:
+            continue
+
+        if fmt.get("acodec") == "none":
+            continue
+
+        if fmt.get("vcodec") == "none":
+            continue
+
+        protocol = fmt.get("protocol") or ""
+
+        ext = fmt.get("ext") or ""
+
+        height = fmt.get("height") or 0
+
+        # Can be directly proxied?
+        direct = protocol in (
+            "https",
+            "http",
         )
 
-    # --------------------------------------------------------
-    # Determine expiry time
-    # --------------------------------------------------------
+        candidates.append({
+            "url": url,
+            "protocol": protocol,
+            "ext": ext,
+            "format_id": fmt.get("format_id"),
+            "width": fmt.get("width"),
+            "height": height,
+            "acodec": fmt.get("acodec"),
+            "vcodec": fmt.get("vcodec"),
+            "direct": direct,
+        })
+
+    if not candidates:
+        raise RuntimeError(
+            "No usable formats found"
+        )
+
+    # Prefer:
+    # 1. highest resolution
+    # 2. mp4
+    candidates.sort(
+        key=lambda f: (
+            f["height"],
+            f["ext"] == "mp4",
+        )
+    )
+
+    best = candidates[-1]
 
     expires = now + DEFAULT_STREAM_CACHE_TIME
 
     try:
-        parsed = urlparse(stream_url)
+        parsed = urlparse(best["url"])
 
         query = parse_qs(parsed.query)
 
-        # YouTube usually includes:
-        # expire=1715975592
         if "expire" in query:
             expires = int(query["expire"][0])
 
     except Exception:
         pass
 
-    # --------------------------------------------------------
-    # Store cache
-    # --------------------------------------------------------
+    best["expires"] = expires
 
     cleanup_stream_cache()
-    STREAM_CACHE[video_id] = {
-        "url": stream_url,
-        "expires": expires,
-    }
 
-    ttl = int(expires - now)
+    STREAM_CACHE[video_id] = best
 
     print(
-        f"STREAM CACHE STORE: "
-        f"{video_id} "
-        f"(TTL {ttl}s)"
+        "Selected format:",
+        best["format_id"],
+        best["protocol"],
+        best["ext"],
+        f'{best["height"]}p',
     )
 
-    return stream_url
+    return best
 
 
-@app.route("/transcode")
-def transcode():
-    # stream chunked MPEG-TS with ffmpeg
-
+@app.route("/watch", methods=["GET", "HEAD"])
+def watch():
     video_id = request.args.get("v")
 
     if not video_id:
         abort(400, "Missing ?v=VIDEO_ID")
 
-    start_time = request.args.get("t")
-
     try:
-        stream_url = get_stream_url(video_id)
+        stream = get_stream_info(video_id)
 
     except Exception as e:
         print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
         abort(500, f"yt-dlp error: {e}")
 
+    if stream["direct"]:
+        return proxy_direct(stream)
+
+    return stream_ffmpeg(stream)
+
+
+def proxy_direct(stream):
+    # directly proxy the original YouTube stream URL
+    headers = {
+        "User-Agent": request.headers.get(
+            "User-Agent",
+            "Mozilla/5.0"
+        )
+    }
+
+    # Forward range requests
+    if "Range" in request.headers:
+        headers["Range"] = request.headers["Range"]
+
+    upstream = HTTP.get(
+        stream["url"],
+        headers=headers,
+        stream=True,
+        timeout=30,
+    )
+
+    excluded = {
+        #"content-encoding",
+        #"transfer-encoding",
+        "connection",
+    }
+
+    response_headers = {
+        k: v
+        for k, v in upstream.headers.items()
+        if k.lower() not in excluded
+    }
+
+    response_headers["Content-Type"] = (
+        upstream.headers.get(
+            "Content-Type",
+            "video/mp4"
+        )
+    )
+
+    if request.method == "HEAD":
+        return Response(
+            status=upstream.status_code,
+            headers=response_headers,
+        )
+
+    return Response(
+        upstream.raw,
+        status=upstream.status_code,
+        headers=response_headers,
+        direct_passthrough=True,
+    )
+
+
+def stream_ffmpeg(stream):
+    # ffmpeg remux
     cmd = [
         "ffmpeg",
+
         "-loglevel",
         "error",
-    ]
 
-    # Fast seek
-    if start_time:
-        cmd.extend(["-ss", str(start_time)])
-
-    cmd.extend([
         "-i",
-        stream_url,
+        stream["url"],
 
-        # No transcoding
+        # no re-encoding
         "-c",
         "copy",
 
-        # MPEG-TS is MUCH more stream-friendly
+        # stable streaming container
         "-f",
         "mpegts",
 
         "pipe:1",
-    ])
+    ]
 
     process = subprocess.Popen(
         cmd,
@@ -829,8 +898,15 @@ def transcode():
 
     def generate():
         try:
+            # Prevent client timeout
+            # 0x47 is the MPEG-TS sync byte
+            # 188 bytes = exact TS packet size
+            yield b"\x47" * 188
+
             while True:
-                chunk = process.stdout.read(64 * 1024)
+                chunk = process.stdout.read(
+                    64 * 1024
+                )
 
                 if not chunk:
                     break
@@ -849,66 +925,14 @@ def transcode():
     )
 
 
-@app.route("/watch")
-def watch():
-    # directly proxy the original YouTube stream URL
-
-    video_id = request.args.get("v")
-
-    if not video_id:
-        abort(400, "Missing ?v=VIDEO_ID")
-
-    try:
-        stream_url = get_stream_url(video_id)
-
-    except Exception as e:
-        print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
-        abort(500, f"yt-dlp error: {e}")
-
-    headers = {}
-
-    # Forward range requests
-    if "Range" in request.headers:
-        headers["Range"] = request.headers["Range"]
-
-    upstream = HTTP.get(
-        stream_url,
-        headers=headers,
-        stream=True,
-        timeout=30,
-    )
-
-    excluded = {
-        "content-encoding",
-        "transfer-encoding",
-        "connection",
-    }
-
-    response_headers = {
-        k: v
-        for k, v in upstream.headers.items()
-        if k.lower() not in excluded
-    }
-
-    return Response(
-        upstream.iter_content(64 * 1024),
-        status=upstream.status_code,
-        headers=response_headers,
-    )
-
-
 @app.route("/")
 def index():
     return """
-    <h1>YouTube Proxy</h1>
+    <h1>YouTube IPTV proxy</h1>
 
     Examples:
     <pre>
     /watch?v=dQw4w9WgXcQ
-    /watch?v=dQw4w9WgXcQ&t=120
-
-    /transcode?v=dQw4w9WgXcQ
-    /transcode?v=dQw4w9WgXcQ&t=120
 
     /channel/TechnologyConnections.m3u
     /channel/Computerphile.m3u?count=10
