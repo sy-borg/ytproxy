@@ -25,6 +25,7 @@ import time
 import os
 import requests
 import sys
+import threading
 from flask import Flask, request, Response, abort
 from urllib.parse import urlparse, parse_qs
 import yt_dlp
@@ -46,8 +47,11 @@ HTTP.headers.update({
 })
 
 
-# Get videos from the rss feed, otherwise from ydl
-CHANNEL_SOURCE = "rss"
+KNOWN_CHANNELS = set()
+KNOWN_CHANNELS_FILE = Path(
+    "/var/lib/ytproxy/known_channels.json"
+)
+CHANNEL_REFRESH_INTERVAL = 1800   # 30min
 
 
 CHANNEL_ID_CACHE = {}
@@ -65,6 +69,211 @@ CHANNEL_CACHE_TIME = 600  # seconds
 CHANNEL_CACHE_DIR = Path(
     "/var/lib/ytproxy/channels"
 )
+CHANNEL_REFRESH_STATUS_FILE = (
+    CHANNEL_CACHE_DIR / "refresh_status.json"
+)
+
+
+def save_refresh_status(
+    started,
+    finished=None,
+    success=None,
+    channels=None,
+    error=None,
+):
+    try:
+        payload = {
+            "started": started,
+            "finished": finished,
+            "success": success,
+            "channels": channels,
+            "error": error,
+        }
+
+        with open(
+            CHANNEL_REFRESH_STATUS_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                payload,
+                f,
+                indent=2
+            )
+
+    except Exception as e:
+        print(
+            f"Failed to save "
+            f"refresh status: {e}"
+        )
+
+
+def load_known_channels():
+    global KNOWN_CHANNELS
+
+    if not KNOWN_CHANNELS_FILE.exists():
+        return
+
+    try:
+        with open(
+            KNOWN_CHANNELS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            payload = json.load(f)
+
+        KNOWN_CHANNELS = set()
+
+        for entry in payload:
+            KNOWN_CHANNELS.add((
+                entry["channel"],
+                entry["count"],
+                entry["include_shorts"],
+            ))
+
+        print(
+            f"Loaded "
+            f"{len(KNOWN_CHANNELS)} "
+            f"known channels"
+        )
+
+    except Exception as e:
+        print(
+            f"Failed to load "
+            f"known channels: {e}"
+        )
+
+
+def save_known_channels():
+    try:
+        KNOWN_CHANNELS_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        payload = []
+
+        for (
+            channel,
+            count,
+            include_shorts
+        ) in sorted(KNOWN_CHANNELS):
+
+            payload.append({
+                "channel": channel,
+                "count": count,
+                "include_shorts": include_shorts,
+            })
+
+        with open(
+            KNOWN_CHANNELS_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                payload,
+                f,
+                indent=2
+            )
+
+    except Exception as e:
+        print(
+            f"Failed to save "
+            f"known channels: {e}"
+        )
+
+
+def register_known_channel(channel_name, count, include_shorts):
+    entry = (
+        channel_name,
+        count,
+        include_shorts
+    )
+
+    if entry in KNOWN_CHANNELS:
+        return
+
+    KNOWN_CHANNELS.add(entry)
+
+    save_known_channels()
+
+    print(
+        "Registered channel:",
+        entry
+    )
+
+
+def refresh_channels_worker():
+    while True:
+        started = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+        try:
+            channels = list(KNOWN_CHANNELS)
+
+            save_refresh_status(
+                started=started,
+                success=None,
+                channels=len(channels),
+            )
+
+            print(
+                f"Refreshing "
+                f"{len(channels)} channels"
+            )
+
+            for (
+                channel,
+                count,
+                include_shorts
+            ) in channels:
+
+                try:
+                    fetch_channel_videos(
+                        channel,
+                        count,
+                        include_shorts,
+                        ydl_fallback=True
+                    )
+
+                except Exception as e:
+                    print(
+                        f"Refresh failed "
+                        f"for {channel}: {e}"
+                    )
+
+            finished = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            save_refresh_status(
+                started=started,
+                finished=finished,
+                success=True,
+                channels=len(channels),
+            )
+
+        except Exception as e:
+            finished = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            save_refresh_status(
+                started=started,
+                finished=finished,
+                success=False,
+                error=str(e),
+            )
+
+            print(
+                f"Channel refresh "
+                f"worker error: {e}"
+            )
+
+        time.sleep(
+            CHANNEL_REFRESH_INTERVAL
+        )
 
 
 def get_channel_cache_file(channel_name, count, include_shorts):
@@ -230,19 +439,6 @@ def get_channel_meta(channel_name, count, include_shorts):
 def fetch_channel_videos_rss(channel_name, count, include_shorts):
     now = time.time()
 
-    cache_key = f"{channel_name}:{count}:{include_shorts}"
-
-    # Return cached result if still valid
-    if cache_key in CHANNEL_CACHE:
-        cached = CHANNEL_CACHE[cache_key]
-
-        if now - cached["time"] < CHANNEL_CACHE_TIME:
-            print(f"CHANNEL_CACHE HIT: {channel_name}")
-
-            return cached["videos"]
-
-    print(f"CHANNEL_CACHE MISS: {channel_name}")
-
     channel_id = get_channel_id(channel_name)
 
     rss_url = (
@@ -255,23 +451,7 @@ def fetch_channel_videos_rss(channel_name, count, include_shorts):
         timeout=15,
     )
 
-    try:
-        response.raise_for_status()
-    except Exception as e:
-        print(f"RSS fetch failed: {e}")
-        cached = load_channel_cache(channel_name, count, include_shorts)
-
-        if cached:
-            print(f"Using stale cache for {channel_name} from {datetime.fromtimestamp(cached["time"]).strftime('%Y-%m-%d %H:%M:%S')}")
-
-            CHANNEL_CACHE[cache_key] = {
-                "time": now,
-                "videos": cached["videos"],
-                "channel": cached["channel"]
-            }
-            return cached["videos"]
-
-        raise
+    response.raise_for_status()
 
     root = ET.fromstring(response.text)
 
@@ -340,6 +520,7 @@ def fetch_channel_videos_rss(channel_name, count, include_shorts):
         reverse=True
     )
 
+    cache_key = f"{channel_name}:{count}:{include_shorts}"
     # Store cache
     CHANNEL_CACHE[cache_key] = {
         "time": now,
@@ -394,19 +575,6 @@ def cleanup_stream_cache():
 
 def fetch_channel_videos_ydl(channel_name, count, include_shorts):
     now = time.time()
-
-    cache_key = f"{channel_name}:{count}:{include_shorts}"
-
-    # Return cached result if still valid
-    if cache_key in CHANNEL_CACHE:
-        cached = CHANNEL_CACHE[cache_key]
-
-        if now - cached["time"] < CHANNEL_CACHE_TIME:
-            print(f"CHANNEL_CACHE HIT: {channel_name}")
-
-            return cached["videos"]
-
-    print(f"CHANNEL_CACHE MISS: {channel_name}")
 
     # Support both:
     #   Computerphile
@@ -495,6 +663,7 @@ def fetch_channel_videos_ydl(channel_name, count, include_shorts):
         reverse=True
     )
 
+    cache_key = f"{channel_name}:{count}:{include_shorts}"
     # Store cache
     CHANNEL_CACHE[cache_key] = {
         "time": now,
@@ -512,10 +681,106 @@ def fetch_channel_videos_ydl(channel_name, count, include_shorts):
     return videos
 
 
-def fetch_channel_videos(channel_name, count, include_shorts):
-    if CHANNEL_SOURCE == "rss":
-        return fetch_channel_videos_rss(channel_name, count, include_shorts)
-    return fetch_channel_videos_ydl(channel_name, count, include_shorts)
+def fetch_channel_videos(
+    channel_name,
+    count,
+    include_shorts,
+    ydl_fallback
+):
+    now = time.time()
+
+    cache_key = (
+        f"{channel_name}:"
+        f"{count}:"
+        f"{include_shorts}"
+    )
+
+    # --------------------------------------------------------
+    # Memory cache
+    # --------------------------------------------------------
+
+    cached = CHANNEL_CACHE.get(cache_key)
+
+    if cached:
+        if now - cached["time"] < CHANNEL_CACHE_TIME:
+            print(
+                f"CHANNEL_CACHE HIT: "
+                f"{channel_name}"
+            )
+
+            return cached["videos"]
+
+    # --------------------------------------------------------
+    # RSS
+    # --------------------------------------------------------
+
+    try:
+        videos = fetch_channel_videos_rss(
+            channel_name,
+            count,
+            include_shorts
+        )
+
+        return videos
+
+    except Exception as e:
+        print(
+            f"RSS failed for "
+            f"{channel_name}: {e}"
+        )
+
+    # --------------------------------------------------------
+    # yt-dlp fallback
+    # --------------------------------------------------------
+    if ydl_fallback:
+        try:
+            print(
+                f"Trying yt-dlp fallback "
+                f"for {channel_name}"
+            )
+
+            videos = fetch_channel_videos_ydl(
+                channel_name,
+                count,
+                include_shorts
+            )
+
+            return videos
+
+        except Exception as e:
+            print(
+                f"yt-dlp fallback failed "
+                f"for {channel_name}: {e}"
+            )
+
+    # --------------------------------------------------------
+    # Stale disk cache fallback
+    # --------------------------------------------------------
+
+    cached = load_channel_cache(
+        channel_name,
+        count,
+        include_shorts
+    )
+
+    if cached:
+        print(
+            f"Using stale cache for "
+            f"{channel_name}"
+        )
+
+        CHANNEL_CACHE[cache_key] = {
+            "time": now,
+            "videos": cached["videos"],
+            "channel": cached["channel"],
+        }
+
+        return cached["videos"]
+
+    raise RuntimeError(
+        f"Failed to fetch "
+        f"{channel_name}"
+    )
 
 
 # ------------------------------------------------------------
@@ -528,7 +793,10 @@ def channel_m3u(channel):
     include_shorts = (
         request.args.get("shorts", "0") == "1"
     )
+
     base_url = request.host_url
+
+    register_known_channel(channel, count, include_shorts)
 
     def generate():
         yield "#EXTM3U\n"
@@ -537,7 +805,8 @@ def channel_m3u(channel):
             videos = fetch_channel_videos(
                 channel,
                 count,
-                include_shorts
+                include_shorts,
+                False
             )
 
             for video in videos:
@@ -583,6 +852,8 @@ def channel_xml(channel):
 
     base_url = request.host_url.rstrip("/")
 
+    register_known_channel(channel, count, include_shorts)
+
     def generate():
         yield '<?xml version="1.0" encoding="UTF-8"?>\n'
 
@@ -598,7 +869,8 @@ def channel_xml(channel):
             videos = fetch_channel_videos(
                 channel,
                 count,
-                include_shorts
+                include_shorts,
+                False
             )
 
             channel_meta = get_channel_meta(channel, count, include_shorts)
@@ -942,6 +1214,12 @@ def index():
 if __name__ == "__main__":
     HOST = os.getenv("YTPROXY_HOST", "0.0.0.0")
     PORT = int(os.getenv("YTPROXY_PORT", "8080"))
-    CHANNEL_SOURCE = os.getenv("YTPROXY_SOURCE", "rss")
     load_channel_id_cache()
+    load_known_channels()
+
+    threading.Thread(
+        target=refresh_channels_worker,
+        daemon=True,
+    ).start()
+
     app.run(host=HOST, port=PORT, threaded=True)

@@ -7,7 +7,6 @@ Type=simple
 
 Environment=YTPROXY_HOST=127.0.0.1
 Environment=YTPROXY_PORT=8090
-Environment=YTPROXY_SOURCE=rss
 ExecStart=/usr/bin/ytproxy
 
 Restart=on-failure
