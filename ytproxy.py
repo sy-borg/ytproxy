@@ -19,21 +19,20 @@ Examples:
     http://localhost:8080/watch?v=dQw4w9WgXcQ
 """
 
-
 import subprocess
 import time
 import os
-import requests
 import sys
 import threading
-from flask import Flask, request, Response, abort
 from urllib.parse import urlparse, parse_qs
-import yt_dlp
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from xml.sax.saxutils import escape
+import json
+import requests
+from flask import Flask, request, Response, abort
+import yt_dlp
 
 app = Flask(__name__)
 HTTP = requests.Session()
@@ -106,7 +105,6 @@ def save_refresh_status(
             f"Failed to save "
             f"refresh status: {e}"
         )
-
 
 def load_known_channels():
     global KNOWN_CHANNELS
@@ -193,6 +191,7 @@ def register_known_channel(channel_name, count, include_shorts):
     if entry in KNOWN_CHANNELS:
         return
 
+    threading.Lock()
     KNOWN_CHANNELS.add(entry)
 
     save_known_channels()
@@ -236,6 +235,7 @@ def refresh_channels_worker():
                         include_shorts,
                         ydl_fallback=True
                     )
+                    time.sleep(1)
 
                 except Exception as e:
                     print(
@@ -427,7 +427,6 @@ def get_channel_id(channel_name):
 
     return channel_id
 
-
 def get_channel_meta(channel_name, count, include_shorts):
     cache_key = f"{channel_name}:{count}:{include_shorts}"
     if cache_key in CHANNEL_CACHE:
@@ -435,6 +434,42 @@ def get_channel_meta(channel_name, count, include_shorts):
         return cached["channel"]
     return None
 
+
+# ------------------------------------------------------------
+# Stream URL cache
+# ------------------------------------------------------------
+
+STREAM_CACHE = {}
+# fallback if expire= is missing
+DEFAULT_STREAM_CACHE_TIME = 1800
+
+
+def cleanup_stream_cache():
+    if not hasattr(cleanup_stream_cache, "cleanup_counter"):
+        cleanup_stream_cache.cleanup_counter = 0
+
+    if cleanup_stream_cache.cleanup_counter < 10:
+        cleanup_stream_cache.cleanup_counter += 1
+        return
+    else:
+        cleanup_stream_cache.cleanup_counter = 0
+
+    print("Cleaning STREAM_CACHE")
+    now = time.time()
+
+    expired = [
+        k for k, v in STREAM_CACHE.items()
+        if v["expires"] <= now
+    ]
+
+    threading.Lock()
+    for k in expired:
+        del STREAM_CACHE[k]
+
+
+# ------------------------------------------------------------
+# Fetch videos
+# ------------------------------------------------------------
 
 def fetch_channel_videos_rss(channel_name, count, include_shorts):
     now = time.time()
@@ -537,41 +572,6 @@ def fetch_channel_videos_rss(channel_name, count, include_shorts):
 
     return videos
 
-
-# ------------------------------------------------------------
-# Stream URL cache
-# ------------------------------------------------------------
-
-STREAM_CACHE = {}
-# fallback if expire= is missing
-DEFAULT_STREAM_CACHE_TIME = 1800
-
-
-def cleanup_stream_cache():
-    if not hasattr(cleanup_stream_cache, "cleanup_counter"):
-        cleanup_stream_cache.cleanup_counter = 0
-
-    if cleanup_stream_cache.cleanup_counter < 10:
-        cleanup_stream_cache.cleanup_counter += 1
-        return
-    else:
-        cleanup_stream_cache.cleanup_counter = 0
-
-    print("Cleaning STREAM_CACHE")
-    now = time.time()
-
-    expired = [
-        k for k, v in STREAM_CACHE.items()
-        if v["expires"] <= now
-    ]
-
-    for k in expired:
-        del STREAM_CACHE[k]
-
-
-# ------------------------------------------------------------
-# Fetch videos
-# ------------------------------------------------------------
 
 def fetch_channel_videos_ydl(channel_name, count, include_shorts):
     now = time.time()
@@ -904,7 +904,8 @@ def channel_xml(channel):
                 yield "<entry>\n"
                 yield f"<id>yt:video:{video['id']}</id>\n"
                 yield f"<yt:videoId>{video['id']}</yt:videoId>\n"
-                yield f"<yt:channelId>{channel_meta["id"]}</yt:channelId>\n"
+                if channel_meta is not None:
+                    yield f"<yt:channelId>{channel_meta["id"]}</yt:channelId>\n"
 
                 title = escape(video['title'])
                 yield f"<title>{title}</title>\n"
@@ -1130,6 +1131,7 @@ def proxy_direct(stream):
             headers=response_headers,
         )
 
+    upstream.raw.decode_content = False
     return Response(
         upstream.raw,
         status=upstream.status_code,
@@ -1140,22 +1142,32 @@ def proxy_direct(stream):
 
 def stream_ffmpeg(stream):
     # ffmpeg remux
+
+    if request.method == "HEAD":
+        return Response(
+            status=200,
+            mimetype="video/mp2t",
+            headers={
+                "Cache-Control": "no-cache",
+            },
+        )
+
     cmd = [
         "ffmpeg",
 
-        "-loglevel",
-        "error",
+        "-loglevel", "error",
 
-        "-i",
-        stream["url"],
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+
+        "-i", stream["url"],
 
         # no re-encoding
-        "-c",
-        "copy",
+        "-c", "copy",
 
         # stable streaming container
-        "-f",
-        "mpegts",
+        "-f", "mpegts",
 
         "pipe:1",
     ]
@@ -1163,7 +1175,7 @@ def stream_ffmpeg(stream):
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         bufsize=0,
     )
 
@@ -1186,6 +1198,7 @@ def stream_ffmpeg(stream):
 
         finally:
             process.kill()
+            process.wait()
 
     return Response(
         generate(),
