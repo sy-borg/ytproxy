@@ -50,7 +50,7 @@ KNOWN_CHANNELS = set()
 KNOWN_CHANNELS_FILE = Path(
     "/var/lib/ytproxy/known_channels.json"
 )
-CHANNEL_REFRESH_INTERVAL = 1800   # 30min
+CHANNEL_REFRESH_INTERVAL = 3600   # 1h
 
 
 CHANNEL_ID_CACHE = {}
@@ -906,6 +906,12 @@ def channel_xml(channel):
                 yield f"<yt:videoId>{video['id']}</yt:videoId>\n"
                 if channel_meta is not None:
                     yield f"<yt:channelId>{channel_meta["id"]}</yt:channelId>\n"
+                    if "author:name" in channel_meta:
+                        channel_author_name = escape(channel_meta["author:name"])
+                        yield "<author>\n"
+                        yield f'<name>{channel_author_name}</name>\n'
+                        yield f'<uri>{channel_meta["author:uri"]}</uri>\n'
+                        yield "</author>\n"
 
                 title = escape(video['title'])
                 yield f"<title>{title}</title>\n"
@@ -1227,12 +1233,14 @@ def index():
 if __name__ == "__main__":
     HOST = os.getenv("YTPROXY_HOST", "0.0.0.0")
     PORT = int(os.getenv("YTPROXY_PORT", "8080"))
+    BG_REFRESH = os.getenv("YTPROXY_BG_REFRESH", "no") == "yes"
     load_channel_id_cache()
     load_known_channels()
 
-    threading.Thread(
-        target=refresh_channels_worker,
-        daemon=True,
-    ).start()
+    if BG_REFRESH:
+        threading.Thread(
+            target=refresh_channels_worker,
+            daemon=True,
+        ).start()
 
     app.run(host=HOST, port=PORT, threaded=True)
