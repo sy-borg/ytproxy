@@ -39,7 +39,7 @@ $ python3 ytproxy.py
 
 * `YTPROXY_HOST`
 * `YTPROXY_PORT`
-* `YTPROXY_SOURCE` Where to get the channel videos from, `rss` (fast, less detail, unreliable) or else with yt-dlp (slow)
+* `YTPROXY_BG_REFRESH` If `yes` refresh channel videos in background
 
 ## Requirements
 

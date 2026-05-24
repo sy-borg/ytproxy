@@ -15,8 +15,11 @@ Usage:
     python3 ytproxy.py
 
 Examples:
-    http://localhost:8080/channel/TechnologyConnections.m3u?count=10
-    http://localhost:8080/watch?v=dQw4w9WgXcQ
+    http://localhost:8080/channel/TechnologyConnections.m3u?count=10&quality=1080
+    http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080
+
+TOTO:
+    * DASH
 """
 
 import subprocess
@@ -793,6 +796,7 @@ def channel_m3u(channel):
     include_shorts = (
         request.args.get("shorts", "0") == "1"
     )
+    quality = request.args.get("quality")
 
     base_url = request.host_url
 
@@ -814,6 +818,11 @@ def channel_m3u(channel):
                     f"{base_url}"
                     f"watch?v={video['id']}"
                 )
+
+                if quality:
+                    stream_url += (
+                        f"&quality={quality}"
+                    )
 
                 visible_title = (
                     #f"[{video['date']}] "
@@ -849,6 +858,7 @@ def channel_xml(channel):
     include_shorts = (
         request.args.get("shorts", "0") == "1"
     )
+    quality = request.args.get("quality")
 
     base_url = request.host_url.rstrip("/")
 
@@ -894,6 +904,11 @@ def channel_xml(channel):
                 stream_url = (
                     f"{base_url}/watch?v={video['id']}"
                 )
+
+                if quality:
+                    stream_url += (
+                        escape(f"&quality={quality}")
+                    )
 
                 thumbnail = video["thumbnail"]
                 pub_date = datetime.fromtimestamp(
@@ -953,17 +968,22 @@ def channel_xml(channel):
 # Cached stream info/URL resolver
 # ------------------------------------------------------------
 
-def get_stream_info(video_id):
+def get_stream_info(video_id, quality=None):
     now = time.time()
 
-    cached = STREAM_CACHE.get(video_id)
+    cache_key = (
+        video_id,
+        quality,
+    )
+
+    cached = STREAM_CACHE.get(cache_key)
 
     if cached:
         if cached["expires"] > now:
             print(f"STREAM_CACHE HIT: {video_id}")
             return cached
 
-        del STREAM_CACHE[video_id]
+        del STREAM_CACHE[cache_key]
 
     print(f"STREAM_CACHE MISS: {video_id}")
 
@@ -995,11 +1015,8 @@ def get_stream_info(video_id):
         if not url:
             continue
 
-        if fmt.get("acodec") == "none":
-            continue
-
-        if fmt.get("vcodec") == "none":
-            continue
+        has_video = fmt.get("vcodec") != "none"
+        has_audio = fmt.get("acodec") != "none"
 
         protocol = fmt.get("protocol") or ""
 
@@ -1008,10 +1025,7 @@ def get_stream_info(video_id):
         height = fmt.get("height") or 0
 
         # Can be directly proxied?
-        direct = protocol in (
-            "https",
-            "http",
-        )
+        direct = (protocol in ("https", "http") and has_audio and has_video)
 
         candidates.append({
             "url": url,
@@ -1022,6 +1036,8 @@ def get_stream_info(video_id):
             "height": height,
             "acodec": fmt.get("acodec"),
             "vcodec": fmt.get("vcodec"),
+            "has_video": has_video,
+            "has_audio": has_audio,
             "direct": direct,
         })
 
@@ -1030,13 +1046,24 @@ def get_stream_info(video_id):
             "No usable formats found"
         )
 
+    if quality is not None:
+        filtered = [
+            f for f in candidates
+            if f["height"] <= quality
+        ]
+
+        if filtered:
+            candidates = filtered
+
     # Prefer:
     # 1. highest resolution
     # 2. mp4
     candidates.sort(
         key=lambda f: (
+            f["has_video"],
             f["height"],
             f["ext"] == "mp4",
+            f["has_audio"],
         )
     )
 
@@ -1059,7 +1086,7 @@ def get_stream_info(video_id):
 
     cleanup_stream_cache()
 
-    STREAM_CACHE[video_id] = best
+    STREAM_CACHE[cache_key] = best
 
     print(
         "Selected format:",
@@ -1079,8 +1106,10 @@ def watch():
     if not video_id:
         abort(400, "Missing ?v=VIDEO_ID")
 
+    quality = request.args.get("quality", type=int)
+
     try:
-        stream = get_stream_info(video_id)
+        stream = get_stream_info(video_id, quality=quality)
 
     except Exception as e:
         print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
