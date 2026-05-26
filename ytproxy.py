@@ -19,7 +19,6 @@ Examples:
     http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080
 
 TOTO:
-    * DASH
 """
 
 import subprocess
@@ -780,10 +779,7 @@ def fetch_channel_videos(
 
         return cached["videos"]
 
-    raise RuntimeError(
-        f"Failed to fetch "
-        f"{channel_name}"
-    )
+    raise RuntimeError(f"Failed to fetch {channel_name}")
 
 
 # ------------------------------------------------------------
@@ -968,6 +964,21 @@ def channel_xml(channel):
 # Cached stream info/URL resolver
 # ------------------------------------------------------------
 
+def get_url_expiry(url):
+    try:
+        parsed = urlparse(url)
+
+        query = parse_qs(parsed.query)
+
+        if "expire" in query:
+            return int(query["expire"][0])
+
+    except Exception:
+        pass
+
+    return int(time.time() + DEFAULT_STREAM_CACHE_TIME)
+
+
 def get_stream_info(video_id, quality=None):
     now = time.time()
 
@@ -980,23 +991,38 @@ def get_stream_info(video_id, quality=None):
 
     if cached:
         if cached["expires"] > now:
-            print(f"STREAM_CACHE HIT: {video_id}")
+            print(
+                f"STREAM_CACHE HIT: "
+                f"{cache_key}"
+            )
             return cached
 
         del STREAM_CACHE[cache_key]
 
-    print(f"STREAM_CACHE MISS: {video_id}")
+    print(
+        f"STREAM_CACHE MISS: "
+        f"{cache_key}"
+    )
 
     youtube_url = (
         f"https://www.youtube.com/watch?v={video_id}"
     )
 
+    if quality:
+        format_selector = (
+            f"bestvideo[height<={quality}]"
+            f"+bestaudio/"
+            f"best[height<={quality}]"
+        )
+    else:
+        format_selector = (
+            "bestvideo+bestaudio/best"
+        )
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-
-        # Best available
-        "format": "best",
+        "format": format_selector,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1005,98 +1031,72 @@ def get_stream_info(video_id, quality=None):
             download=False
         )
 
-    formats = info.get("formats", [])
+    # --------------------------------------------------------
+    # DASH / adaptive streams
+    # --------------------------------------------------------
 
-    candidates = []
-
-    for fmt in formats:
-        url = fmt.get("url")
-
-        if not url:
-            continue
-
-        has_video = fmt.get("vcodec") != "none"
-        has_audio = fmt.get("acodec") != "none"
-
-        protocol = fmt.get("protocol") or ""
-
-        ext = fmt.get("ext") or ""
-
-        height = fmt.get("height") or 0
-
-        # Can be directly proxied?
-        direct = (protocol in ("https", "http") and has_audio and has_video)
-
-        candidates.append({
-            "url": url,
-            "protocol": protocol,
-            "ext": ext,
-            "format_id": fmt.get("format_id"),
-            "width": fmt.get("width"),
-            "height": height,
-            "acodec": fmt.get("acodec"),
-            "vcodec": fmt.get("vcodec"),
-            "has_video": has_video,
-            "has_audio": has_audio,
-            "direct": direct,
-        })
-
-    if not candidates:
-        raise RuntimeError(
-            "No usable formats found"
-        )
-
-    if quality is not None:
-        filtered = [
-            f for f in candidates
-            if f["height"] <= quality
-        ]
-
-        if filtered:
-            candidates = filtered
-
-    # Prefer:
-    # 1. highest resolution
-    # 2. mp4
-    candidates.sort(
-        key=lambda f: (
-            f["has_video"],
-            f["height"],
-            f["ext"] == "mp4",
-            f["has_audio"],
-        )
+    requested = info.get(
+        "requested_formats"
     )
 
-    best = candidates[-1]
+    if requested:
+        video_fmt = None
+        audio_fmt = None
 
-    expires = now + DEFAULT_STREAM_CACHE_TIME
+        for fmt in requested:
+            if fmt.get("vcodec") != "none" and video_fmt is None:
+                video_fmt = fmt
 
-    try:
-        parsed = urlparse(best["url"])
+            if fmt.get("acodec") != "none" and fmt.get("vcodec") == "none" and audio_fmt is None:
+                audio_fmt = fmt
 
-        query = parse_qs(parsed.query)
+        if not video_fmt:
+            raise RuntimeError("No video stream found")
 
-        if "expire" in query:
-            expires = int(query["expire"][0])
+        if not audio_fmt:
+            raise RuntimeError("No audio stream found")
 
-    except Exception:
-        pass
+        if video_fmt["url"] == audio_fmt["url"]:
+            stream = {
+                "mode": "ffmpeg-single",
+                "url": video_fmt["url"],
+                "height": video_fmt.get("height"),
+                "protocol": video_fmt.get("protocol"),
+                "expires": get_url_expiry(video_fmt["url"]),
+            }
+        else:
+            video_expiry = get_url_expiry(video_fmt["url"])
+            audio_expiry = get_url_expiry(audio_fmt["url"])
+            stream = {
+                "mode": "ffmpeg-dual",
+                "video_url": video_fmt["url"],
+                "audio_url": audio_fmt["url"],
+                "height": video_fmt.get("height"),
+                "protocol": video_fmt.get("protocol"),
+                "expires": min(video_expiry, audio_expiry),
+            }
 
-    best["expires"] = expires
+    # --------------------------------------------------------
+    # Progressive stream
+    # --------------------------------------------------------
+
+    else:
+        stream = {
+            "mode": "direct",
+            "url": info["url"],
+            "height": info.get("height"),
+            "ext": info.get("ext"),
+            "protocol": info.get("protocol"),
+            "expires": get_url_expiry(info["url"]),
+        }
 
     cleanup_stream_cache()
 
-    STREAM_CACHE[cache_key] = best
+    STREAM_CACHE[cache_key] = stream
 
-    print(
-        "Selected format:",
-        best["format_id"],
-        best["protocol"],
-        best["ext"],
-        f'{best["height"]}p',
-    )
+    print("Selected stream:", stream)
 
-    return best
+    return stream
 
 
 @app.route("/watch", methods=["GET", "HEAD"])
@@ -1106,16 +1106,21 @@ def watch():
     if not video_id:
         abort(400, "Missing ?v=VIDEO_ID")
 
-    quality = request.args.get("quality", type=int)
+    quality = request.args.get(
+        "quality",
+        type=int
+    )
 
     try:
-        stream = get_stream_info(video_id, quality=quality)
+        stream = get_stream_info(
+            video_id,
+            quality,
+        )
 
     except Exception as e:
-        print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
         abort(500, f"yt-dlp error: {e}")
 
-    if stream["direct"]:
+    if stream["mode"] == "direct":
         return proxy_direct(stream)
 
     return stream_ffmpeg(stream)
@@ -1196,16 +1201,30 @@ def stream_ffmpeg(stream):
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
 
-        "-i", stream["url"],
-
-        # no re-encoding
-        "-c", "copy",
-
-        # stable streaming container
         "-f", "mpegts",
 
         "pipe:1",
     ]
+    if stream["mode"] == "ffmpeg-single":
+        cmd.extend([
+            "-i", stream["url"],
+
+            "-c", "copy"
+        ])
+
+    else:
+        cmd.extend([
+            "-i", stream["video_url"],
+            "-i", stream["audio_url"],
+
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+
+            "-c:v", "copy",
+            "-c:a", "aac",
+
+            "-b:a", "192k",
+        ])
 
     process = subprocess.Popen(
         cmd,
