@@ -1008,15 +1008,35 @@ def get_stream_info(video_id, quality=None):
         f"https://www.youtube.com/watch?v={video_id}"
     )
 
+    """
+        # Avoind AV1, can result in bad quality
+        if quality:
+            format_selector = (
+                f"bestvideo[vcodec^=avc1]"
+                f"[height<={quality}]"
+                f"+bestaudio/"
+                f"bestvideo[height<={quality}]"
+                f"+bestaudio/"
+                f"best[height<={quality}]"
+            )
+        else:
+            format_selector = (
+                "bestvideo[vcodec^=avc1]+bestaudio/best"
+            )
+    """
+    # YouTube's "bestvideo" is often VP9 (codec vp9) or AV1 (av01). Copying VP9/AV1 video into an MPEG-TS
+    # container produces a stream that most media servers and players don't recognize as directly playable —
+    # they'll fall back to transcoding. For maximum direct-play compatibility with Emby/Jellyfin,
+    # constrain yt-dlp to prefer H.264:
     if quality:
         format_selector = (
-            f"bestvideo[height<={quality}]"
-            f"+bestaudio/"
+            f"bestvideo[vcodec^=avc1][height<={quality}]"
+            f"+bestaudio[acodec^=mp4a]/"
             f"best[height<={quality}]"
         )
     else:
         format_selector = (
-            "bestvideo+bestaudio/best"
+            "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best"
         )
 
     ydl_opts = {
@@ -1075,6 +1095,7 @@ def get_stream_info(video_id, quality=None):
                 "protocol": video_fmt.get("protocol"),
                 "expires": min(video_expiry, audio_expiry),
             }
+        print(video_fmt.get("vcodec"))
 
     # --------------------------------------------------------
     # Progressive stream
@@ -1192,39 +1213,33 @@ def stream_ffmpeg(stream):
             },
         )
 
-    cmd = [
+    # Global / input options shared by all modes
+    base_cmd = [
         "ffmpeg",
-
         "-loglevel", "error",
-
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
-
-        "-f", "mpegts",
-
-        "pipe:1",
     ]
     if stream["mode"] == "ffmpeg-single":
-        cmd.extend([
+        cmd = base_cmd + [
             "-i", stream["url"],
-
-            "-c", "copy"
-        ])
-
-    else:
-        cmd.extend([
+            "-c", "copy",
+            "-f", "mpegts",
+            "pipe:1",
+        ]
+    else:  # ffmpeg-dual
+        cmd = base_cmd + [
             "-i", stream["video_url"],
             "-i", stream["audio_url"],
-
             "-map", "0:v:0",
             "-map", "1:a:0",
-
             "-c:v", "copy",
             "-c:a", "aac",
-
             "-b:a", "192k",
-        ])
+            "-f", "mpegts",
+            "pipe:1",
+        ]
 
     process = subprocess.Popen(
         cmd,
@@ -1238,7 +1253,12 @@ def stream_ffmpeg(stream):
             # Prevent client timeout
             # 0x47 is the MPEG-TS sync byte
             # 188 bytes = exact TS packet size
-            yield b"\x47" * 188
+            #yield b"\x47" * 188
+            yield b"\x00"
+            # This sends 188 bytes of 0x47 as the first "packet." But a valid MPEG-TS packet is 188 bytes where
+            # only the first byte is 0x47 — the remaining 187 bytes carry the header (PID, continuity counter, etc.)
+            # and payload. Emby's demuxer reads this, finds a valid sync byte, then chokes on the nonsensical header fields.
+            # Instead, just let ffmpeg produce its own valid TS output from the start:
 
             while True:
                 chunk = process.stdout.read(
