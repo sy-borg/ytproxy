@@ -453,8 +453,7 @@ def cleanup_stream_cache():
     if cleanup_stream_cache.cleanup_counter < 10:
         cleanup_stream_cache.cleanup_counter += 1
         return
-    else:
-        cleanup_stream_cache.cleanup_counter = 0
+    cleanup_stream_cache.cleanup_counter = 0
 
     print("Cleaning STREAM_CACHE")
     now = time.time()
@@ -1008,22 +1007,6 @@ def get_stream_info(video_id, quality=None):
         f"https://www.youtube.com/watch?v={video_id}"
     )
 
-    """
-        # Avoind AV1, can result in bad quality
-        if quality:
-            format_selector = (
-                f"bestvideo[vcodec^=avc1]"
-                f"[height<={quality}]"
-                f"+bestaudio/"
-                f"bestvideo[height<={quality}]"
-                f"+bestaudio/"
-                f"best[height<={quality}]"
-            )
-        else:
-            format_selector = (
-                "bestvideo[vcodec^=avc1]+bestaudio/best"
-            )
-    """
     # YouTube's "bestvideo" is often VP9 (codec vp9) or AV1 (av01). Copying VP9/AV1 video into an MPEG-TS
     # container produces a stream that most media servers and players don't recognize as directly playable —
     # they'll fall back to transcoding. For maximum direct-play compatibility with Emby/Jellyfin,
