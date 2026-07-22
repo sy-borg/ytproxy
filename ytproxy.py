@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-YYouTube IPTV proxy.
+YouTube IPTV proxy.
 
 Features:
 - Streams YouTube videos directly or via ffmpeg
