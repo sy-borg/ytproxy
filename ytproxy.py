@@ -48,9 +48,6 @@ MAX_BYTES = 10_000_000  # 10 MB
 BACKUP_COUNT = 5        # Keep 5 rotated files
 
 LOG_LEVEL = os.getenv("YTPROXY_LOG_LEVEL", "INFO").upper()
-# Converts MPEG-TS to MP4 whern requested with a browser user agent
-# (Unfortunately Emby also calls this with a Browser user agent)
-BROWSER_STREAMING = os.getenv("YTPROXY_BROWSER_STREAMING", "no") == "yes"
 
 def setup_logging():
     """Initialize logging with rotating file handler and optional console output."""
@@ -1119,10 +1116,8 @@ def watch():
     if not video_id:
         abort(400, "Missing ?v=VIDEO_ID")
 
-    quality = request.args.get(
-        "quality",
-        type=int
-    )
+    quality = request.args.get("quality", type=int)
+    preferred_container = request.args.get("container")  # Optional override
 
     try:
         stream = get_stream_info(
@@ -1135,12 +1130,12 @@ def watch():
         abort(500, f"yt-dlp error: {e}")
 
     if stream["mode"] == "direct":
-        return proxy_direct(stream)
+        return proxy_direct(stream, preferred_container)
 
-    return stream_ffmpeg(stream)
+    return stream_ffmpeg(stream, preferred_container)
 
 
-def proxy_direct(stream):
+def proxy_direct(stream, preferred_container):
     # directly proxy the original YouTube stream URL
     headers = {
         "User-Agent": request.headers.get(
@@ -1194,7 +1189,7 @@ def proxy_direct(stream):
     )
 
 
-def stream_ffmpeg(stream):
+def stream_ffmpeg(stream, preferred_container):
     # ffmpeg remux
 
     if request.method == "HEAD":
@@ -1219,14 +1214,11 @@ def stream_ffmpeg(stream):
     mov_flags = ()
     mimetype = "video/mp2t"
 
-    if BROWSER_STREAMING:
-        user_agent = request.headers.get("User-Agent", "")
-
+    if preferred_container == "mp4":
         # Serve fMP4 to browsers that lack TS support
-        if "Firefox" in user_agent or "Chrome" in user_agent or "Safari" in user_agent:
-            container_format = "mp4"
-            mov_flags = "-movflags", "frag_keyframe+empty_moov"
-            mimetype = "video/mp4"
+        container_format = "mp4"
+        mov_flags = "-movflags", "frag_keyframe+empty_moov"
+        mimetype = "video/mp4"
 
     if stream["mode"] == "ffmpeg-single":
         cmd = base_cmd + [
