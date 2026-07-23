@@ -18,7 +18,7 @@ Examples:
     http://localhost:8080/channel/TechnologyConnections.m3u?count=10&quality=1080
     http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080
 
-TOTO:
+TODO:
 """
 
 import subprocess
@@ -26,6 +26,8 @@ import time
 import os
 import sys
 import threading
+import logging
+import logging.handlers
 from urllib.parse import urlparse, parse_qs
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -35,6 +37,61 @@ import json
 import requests
 from flask import Flask, request, Response, abort
 import yt_dlp
+
+# ------------------------------------------------------------
+# Logging Setup
+# ------------------------------------------------------------
+
+LOG_DIR = Path(os.getenv("YTPROXY_LOG_DIR", "/var/log/ytproxy"))
+LOG_FILE = LOG_DIR / "ytproxy.log"
+MAX_BYTES = 10_000_000  # 10 MB
+BACKUP_COUNT = 5        # Keep 5 rotated files
+
+LOG_LEVEL = os.getenv("YTPROXY_LOG_LEVEL", "INFO").upper()
+# Converts MPEG-TS to MP4 whern requested with a browser user agent
+# (Unfortunately Emby also calls this with a Browser user agent)
+BROWSER_STREAMING = os.getenv("YTPROXY_BROWSER_STREAMING", "no") == "yes"
+
+def setup_logging():
+    """Initialize logging with rotating file handler and optional console output."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        sys.stderr.write(f"Warning: Could not create log directory {LOG_DIR}: {e}\n")
+        return
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s [%(threadName)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Rotating file handler
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=MAX_BYTES,
+        backupCount=BACKUP_COUNT,
+        encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(LOG_LEVEL)
+
+    # Console handler for initial startup (optional, can be removed in production)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
+
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    # Reduce Flask's verbose logging
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+
+setup_logging()
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 HTTP = requests.Session()
@@ -103,10 +160,7 @@ def save_refresh_status(
             )
 
     except Exception as e:
-        print(
-            f"Failed to save "
-            f"refresh status: {e}"
-        )
+        log.error(f"Failed to save refresh status: {e}")
 
 def load_known_channels():
     global KNOWN_CHANNELS
@@ -131,17 +185,10 @@ def load_known_channels():
                 entry["include_shorts"],
             ))
 
-        print(
-            f"Loaded "
-            f"{len(KNOWN_CHANNELS)} "
-            f"known channels"
-        )
+        log.info(f"Loaded {len(KNOWN_CHANNELS)} known channels")
 
     except Exception as e:
-        print(
-            f"Failed to load "
-            f"known channels: {e}"
-        )
+        log.error(f"Failed to load known channels: {e}")
 
 
 def save_known_channels():
@@ -177,10 +224,7 @@ def save_known_channels():
             )
 
     except Exception as e:
-        print(
-            f"Failed to save "
-            f"known channels: {e}"
-        )
+        log.error(f"Failed to save known channels: {e}")
 
 
 def register_known_channel(channel_name, count, include_shorts):
@@ -193,15 +237,11 @@ def register_known_channel(channel_name, count, include_shorts):
     if entry in KNOWN_CHANNELS:
         return
 
-    threading.Lock()
     KNOWN_CHANNELS.add(entry)
 
     save_known_channels()
 
-    print(
-        "Registered channel:",
-        entry
-    )
+    log.debug(f"Registered channel: {entry}")
 
 
 def refresh_channels_worker():
@@ -219,10 +259,7 @@ def refresh_channels_worker():
                 channels=len(channels),
             )
 
-            print(
-                f"Refreshing "
-                f"{len(channels)} channels"
-            )
+            log.info(f"Refreshing {len(channels)} channels")
 
             for (
                 channel,
@@ -240,10 +277,7 @@ def refresh_channels_worker():
                     time.sleep(1)
 
                 except Exception as e:
-                    print(
-                        f"Refresh failed "
-                        f"for {channel}: {e}"
-                    )
+                    log.warning(f"Refresh failed for {channel}: {e}")
 
             finished = datetime.now(
                 timezone.utc
@@ -268,10 +302,7 @@ def refresh_channels_worker():
                 error=str(e),
             )
 
-            print(
-                f"Channel refresh "
-                f"worker error: {e}"
-            )
+            log.error(f"Channel refresh worker error: {e}")
 
         time.sleep(
             CHANNEL_REFRESH_INTERVAL
@@ -321,7 +352,7 @@ def save_channel_cache(
             json.dump(payload, f)
 
     except Exception as e:
-        print(f"Failed to save channel cache: {e}")
+        log.error(f"Failed to save channel cache: {e}")
 
 
 def load_channel_cache(channel_name, count, include_shorts):
@@ -343,7 +374,7 @@ def load_channel_cache(channel_name, count, include_shorts):
             return json.load(f)
 
     except Exception as e:
-        print(f"Failed to load channel cache: {e}")
+        log.error(f"Failed to load channel cache: {e}")
 
     return None
 
@@ -362,10 +393,10 @@ def load_channel_id_cache():
         ) as f:
             CHANNEL_ID_CACHE = json.load(f)
 
-        print(f"Loaded {len(CHANNEL_ID_CACHE)} channel IDs")
+        log.info(f"Loaded {len(CHANNEL_ID_CACHE)} channel IDs")
 
     except Exception as e:
-        print(f"Failed to load channel ID cache: {e}")
+        log.error(f"Failed to load channel ID cache: {e}")
 
 
 def save_channel_id_cache():
@@ -388,15 +419,15 @@ def save_channel_id_cache():
             )
 
     except Exception as e:
-        print(f"Failed to save channel ID cache: {e}")
+        log.error(f"Failed to save channel ID cache: {e}")
 
 
 def get_channel_id(channel_name):
     if channel_name in CHANNEL_ID_CACHE:
-        print(f"CHANNEL_ID_CACHE HIT: {channel_name}")
+        log.debug(f"CHANNEL_ID_CACHE HIT: {channel_name}")
         return CHANNEL_ID_CACHE[channel_name]
 
-    print(f"CHANNEL_ID_CACHE MISS: {channel_name}")
+    log.debug(f"CHANNEL_ID_CACHE MISS: {channel_name}")
 
     channel_name_at = channel_name
     if not channel_name.startswith("@"):
@@ -455,7 +486,7 @@ def cleanup_stream_cache():
         return
     cleanup_stream_cache.cleanup_counter = 0
 
-    print("Cleaning STREAM_CACHE")
+    log.debug("Cleaning STREAM_CACHE")
     now = time.time()
 
     expired = [
@@ -463,7 +494,6 @@ def cleanup_stream_cache():
         if v["expires"] <= now
     ]
 
-    threading.Lock()
     for k in expired:
         del STREAM_CACHE[k]
 
@@ -704,10 +734,7 @@ def fetch_channel_videos(
 
     if cached:
         if now - cached["time"] < CHANNEL_CACHE_TIME:
-            print(
-                f"CHANNEL_CACHE HIT: "
-                f"{channel_name}"
-            )
+            log.debug(f"CHANNEL_CACHE HIT: {channel_name}")
 
             return cached["videos"]
 
@@ -725,20 +752,14 @@ def fetch_channel_videos(
         return videos
 
     except Exception as e:
-        print(
-            f"RSS failed for "
-            f"{channel_name}: {e}"
-        )
+        log.warning(f"RSS failed for {channel_name}: {e}")
 
     # --------------------------------------------------------
     # yt-dlp fallback
     # --------------------------------------------------------
     if ydl_fallback:
         try:
-            print(
-                f"Trying yt-dlp fallback "
-                f"for {channel_name}"
-            )
+            log.debug(f"Trying yt-dlp fallback for {channel_name}")
 
             videos = fetch_channel_videos_ydl(
                 channel_name,
@@ -749,10 +770,7 @@ def fetch_channel_videos(
             return videos
 
         except Exception as e:
-            print(
-                f"yt-dlp fallback failed "
-                f"for {channel_name}: {e}"
-            )
+            log.warning(f"yt-dlp fallback failed for {channel_name}: {e}")
 
     # --------------------------------------------------------
     # Stale disk cache fallback
@@ -765,10 +783,7 @@ def fetch_channel_videos(
     )
 
     if cached:
-        print(
-            f"Using stale cache for "
-            f"{channel_name}"
-        )
+        log.debug(f"Using stale cache for {channel_name}")
 
         CHANNEL_CACHE[cache_key] = {
             "time": now,
@@ -838,7 +853,7 @@ def channel_m3u(channel):
                 yield stream_url + "\n"
 
         except Exception as e:
-            print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
+            log.error(f"Error generating M3U for {channel}: {e}")
             yield f"# ERROR: {e}\n"
 
     return Response(
@@ -948,7 +963,7 @@ def channel_xml(channel):
                 yield "</entry>\n"
 
         except Exception as e:
-            print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
+            log.error(f"Error generating XML for {channel}: {e}")
             yield f"<error><![CDATA[{e}]]></error>\n"
 
         yield "</feed>\n"
@@ -990,18 +1005,12 @@ def get_stream_info(video_id, quality=None):
 
     if cached:
         if cached["expires"] > now:
-            print(
-                f"STREAM_CACHE HIT: "
-                f"{cache_key}"
-            )
+            log.debug(f"STREAM_CACHE HIT: {cache_key}")
             return cached
 
         del STREAM_CACHE[cache_key]
 
-    print(
-        f"STREAM_CACHE MISS: "
-        f"{cache_key}"
-    )
+    log.debug(f"STREAM_CACHE MISS: {cache_key}")
 
     youtube_url = (
         f"https://www.youtube.com/watch?v={video_id}"
@@ -1078,7 +1087,7 @@ def get_stream_info(video_id, quality=None):
                 "protocol": video_fmt.get("protocol"),
                 "expires": min(video_expiry, audio_expiry),
             }
-        print(video_fmt.get("vcodec"))
+        log.debug(f"Selected video codec: {video_fmt.get('vcodec')}")
 
     # --------------------------------------------------------
     # Progressive stream
@@ -1098,7 +1107,7 @@ def get_stream_info(video_id, quality=None):
 
     STREAM_CACHE[cache_key] = stream
 
-    print("Selected stream:", stream)
+    log.debug(f"Selected stream: {stream}")
 
     return stream
 
@@ -1122,6 +1131,7 @@ def watch():
         )
 
     except Exception as e:
+        log.error(f"yt-dlp error for {video_id}: {e}")
         abort(500, f"yt-dlp error: {e}")
 
     if stream["mode"] == "direct":
@@ -1190,7 +1200,7 @@ def stream_ffmpeg(stream):
     if request.method == "HEAD":
         return Response(
             status=200,
-            mimetype="video/mp2t",
+            mimetype="video/mp4",
             headers={
                 "Cache-Control": "no-cache",
             },
@@ -1204,13 +1214,26 @@ def stream_ffmpeg(stream):
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
     ]
+
+    container_format = "mpegts"
+    mov_flags = ()
+    mimetype = "video/mp2t"
+
+    if BROWSER_STREAMING:
+        user_agent = request.headers.get("User-Agent", "")
+
+        # Serve fMP4 to browsers that lack TS support
+        if "Firefox" in user_agent or "Chrome" in user_agent or "Safari" in user_agent:
+            container_format = "mp4"
+            mov_flags = "-movflags", "frag_keyframe+empty_moov"
+            mimetype = "video/mp4"
+
     if stream["mode"] == "ffmpeg-single":
         cmd = base_cmd + [
             "-i", stream["url"],
             "-c", "copy",
-            "-f", "mpegts",
-            "pipe:1",
-        ]
+            "-f", container_format,
+        ] + list(mov_flags) + ["pipe:1"]
     else:  # ffmpeg-dual
         cmd = base_cmd + [
             "-i", stream["video_url"],
@@ -1220,9 +1243,10 @@ def stream_ffmpeg(stream):
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
-            "-f", "mpegts",
-            "pipe:1",
-        ]
+            "-f", container_format,
+        ] + list(mov_flags) + ["pipe:1"]
+
+    log.debug(f"Starting ffmpeg stream ({container_format}): {' '.join(cmd)}")
 
     process = subprocess.Popen(
         cmd,
@@ -1233,16 +1257,7 @@ def stream_ffmpeg(stream):
 
     def generate():
         try:
-            # Prevent client timeout
-            # 0x47 is the MPEG-TS sync byte
-            # 188 bytes = exact TS packet size
-            #yield b"\x47" * 188
-            yield b"\x00"
-            # This sends 188 bytes of 0x47 as the first "packet." But a valid MPEG-TS packet is 188 bytes where
-            # only the first byte is 0x47 — the remaining 187 bytes carry the header (PID, continuity counter, etc.)
-            # and payload. Emby's demuxer reads this, finds a valid sync byte, then chokes on the nonsensical header fields.
-            # Instead, just let ffmpeg produce its own valid TS output from the start:
-
+            # Let ffmpeg produce valid stream from the start
             while True:
                 chunk = process.stdout.read(
                     64 * 1024
@@ -1259,7 +1274,7 @@ def stream_ffmpeg(stream):
 
     return Response(
         generate(),
-        mimetype="video/mp2t",
+        mimetype=mimetype,
         headers={
             "Cache-Control": "no-cache",
         },
@@ -1287,6 +1302,8 @@ if __name__ == "__main__":
     BG_REFRESH = os.getenv("YTPROXY_BG_REFRESH", "no") == "yes"
     load_channel_id_cache()
     load_known_channels()
+
+    log.info(f"Starting ytproxy on {HOST}:{PORT}")
 
     if BG_REFRESH:
         threading.Thread(
