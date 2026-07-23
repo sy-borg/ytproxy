@@ -16,7 +16,7 @@ Usage:
 
 Examples:
     http://localhost:8080/channel/TechnologyConnections.m3u?count=10&quality=1080
-    http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080
+    http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080&container=mp4
 
 TODO:
 """
