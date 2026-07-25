@@ -51,26 +51,11 @@ LOG_LEVEL = os.getenv("YTPROXY_LOG_LEVEL", "INFO").upper()
 
 def setup_logging():
     """Initialize logging with rotating file handler and optional console output."""
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        sys.stderr.write(f"Warning: Could not create log directory {LOG_DIR}: {e}\n")
-        return
 
     formatter = logging.Formatter(
         fmt="%(asctime)s %(levelname)s [%(threadName)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-
-    # Rotating file handler
-    file_handler = logging.handlers.RotatingFileHandler(
-        LOG_FILE,
-        maxBytes=MAX_BYTES,
-        backupCount=BACKUP_COUNT,
-        encoding="utf-8"
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(LOG_LEVEL)
 
     # Console handler for initial startup (optional, can be removed in production)
     console_handler = logging.StreamHandler()
@@ -80,11 +65,33 @@ def setup_logging():
     # Configure root logger
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
     # Reduce Flask's verbose logging
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        sys.stderr.write(f"Warning: Could not create log directory {LOG_DIR}: {e}\n")
+        return
+
+    # Rotating file handler
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=MAX_BYTES,
+            backupCount=BACKUP_COUNT,
+            encoding="utf-8"
+        )
+    except Exception as e:
+        sys.stderr.write(f"Warning: Could not create file handler {LOG_FILE}: {e}\n")
+        return
+
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(LOG_LEVEL)
+
+    logger.addHandler(file_handler)
 
 
 setup_logging()
@@ -1044,9 +1051,7 @@ def get_stream_info(video_id, quality=None):
     # DASH / adaptive streams
     # --------------------------------------------------------
 
-    requested = info.get(
-        "requested_formats"
-    )
+    requested = info.get("requested_formats")
 
     if requested:
         video_fmt = None
@@ -1117,7 +1122,9 @@ def watch():
         abort(400, "Missing ?v=VIDEO_ID")
 
     quality = request.args.get("quality", type=int)
-    preferred_container = request.args.get("container")  # Optional override
+    # Optional container, either mp4 or nothing
+    # Use when streaming to browser that don't support MPEG-TS
+    preferred_container = request.args.get("container")
 
     try:
         stream = get_stream_info(
@@ -1130,12 +1137,12 @@ def watch():
         abort(500, f"yt-dlp error: {e}")
 
     if stream["mode"] == "direct":
-        return proxy_direct(stream, preferred_container)
+        return proxy_direct(stream)
 
     return stream_ffmpeg(stream, preferred_container)
 
 
-def proxy_direct(stream, preferred_container):
+def proxy_direct(stream):
     # directly proxy the original YouTube stream URL
     headers = {
         "User-Agent": request.headers.get(
