@@ -40,6 +40,8 @@ $ python3 ytproxy.py
 * `YTPROXY_HOST`
 * `YTPROXY_PORT`
 * `YTPROXY_BG_REFRESH` If `yes` refresh channel videos in background
+* `YTPROXY_LOG_DIR`
+* `YTPROXY_LOG_LEVEL`
 
 ## Requirements
 
