@@ -6,10 +6,13 @@ YouTube IPTV proxy.
 Features:
 - Streams YouTube videos directly or via ffmpeg
 - HTTP Range support
-- Works with mpv/VLC/Kodi/Jellyfin/Emby
+- Works with mpv/VLC/Kodi/Jellyfin/Emby/Browser
 
 Requirements:
-    pip install flask yt-dlp
+- python
+- python-flask
+- yt-dlp
+- ffmpeg
 
 Usage:
     python3 ytproxy.py
@@ -44,8 +47,8 @@ import yt_dlp
 
 LOG_DIR = Path(os.getenv("YTPROXY_LOG_DIR", "/var/log/ytproxy"))
 LOG_FILE = LOG_DIR / "ytproxy.log"
-MAX_BYTES = 10_000_000  # 10 MB
-BACKUP_COUNT = 5        # Keep 5 rotated files
+LOG_MAX_BYTES = 1_000_000  # 1 MB
+LOG_BACKUP_COUNT = 5       # Keep 5 rotated files
 
 LOG_LEVEL = os.getenv("YTPROXY_LOG_LEVEL", "INFO").upper()
 
@@ -80,8 +83,8 @@ def setup_logging():
     try:
         file_handler = logging.handlers.RotatingFileHandler(
             LOG_FILE,
-            maxBytes=MAX_BYTES,
-            backupCount=BACKUP_COUNT,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
             encoding="utf-8"
         )
     except Exception as e:
@@ -1120,6 +1123,8 @@ def watch():
 
     if not video_id:
         abort(400, "Missing ?v=VIDEO_ID")
+
+    log.debug(f"Watch: {video_id}; User-Agent: {request.headers.get("User-Agent", "")}")
 
     quality = request.args.get("quality", type=int)
     # Optional container, either mp4 or nothing
