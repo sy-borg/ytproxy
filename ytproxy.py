@@ -1255,7 +1255,7 @@ def stream_ffmpeg(stream, preferred_container):
 
     log.debug(f"Starting ffmpeg stream ({container_format}): {' '.join(cmd)}")
 
-    CHUNK_SIZE = 1024 * 1024      # 1 MiB
+    CHUNK_SIZE = 4 * 1024 * 1024      # 4 MiB
 
     process = subprocess.Popen(
         cmd,
