@@ -63,7 +63,7 @@ def setup_logging():
     # Console handler for initial startup (optional, can be removed in production)
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(LOG_LEVEL)
 
     # Configure root logger
     logger = logging.getLogger()
@@ -1079,6 +1079,7 @@ def get_stream_info(video_id, quality=None):
                 "url": video_fmt["url"],
                 "height": video_fmt.get("height"),
                 "protocol": video_fmt.get("protocol"),
+                "duration": info.get("duration") or -1,
                 "expires": get_url_expiry(video_fmt["url"]),
             }
         else:
@@ -1090,6 +1091,7 @@ def get_stream_info(video_id, quality=None):
                 "audio_url": audio_fmt["url"],
                 "height": video_fmt.get("height"),
                 "protocol": video_fmt.get("protocol"),
+                "duration": info.get("duration") or -1,
                 "expires": min(video_expiry, audio_expiry),
             }
         log.debug(f"Selected video codec: {video_fmt.get('vcodec')}")
@@ -1105,6 +1107,7 @@ def get_stream_info(video_id, quality=None):
             "height": info.get("height"),
             "ext": info.get("ext"),
             "protocol": info.get("protocol"),
+            "duration": info.get("duration") or -1,
             "expires": get_url_expiry(info["url"]),
         }
 
@@ -1252,24 +1255,22 @@ def stream_ffmpeg(stream, preferred_container):
 
     log.debug(f"Starting ffmpeg stream ({container_format}): {' '.join(cmd)}")
 
+    CHUNK_SIZE = 1024 * 1024      # 1 MiB
+
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        bufsize=0,
+        bufsize=CHUNK_SIZE,
     )
 
     def generate():
         try:
             # Let ffmpeg produce valid stream from the start
             while True:
-                chunk = process.stdout.read(
-                    64 * 1024
-                )
-
+                chunk = process.stdout.read(CHUNK_SIZE)
                 if not chunk:
                     break
-
                 yield chunk
 
         finally:

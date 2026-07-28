@@ -1,7 +1,7 @@
 # Maintainer: sa
 
 pkgname=ytproxy
-pkgver=1.2.4
+pkgver=1.2.5
 pkgrel=1
 pkgdesc="YouTube IPTV proxy"
 arch=('any')
