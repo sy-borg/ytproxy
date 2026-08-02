@@ -51,6 +51,7 @@ LOG_MAX_BYTES = 1_000_000  # 1 MB
 LOG_BACKUP_COUNT = 5       # Keep 5 rotated files
 
 LOG_LEVEL = os.getenv("YTPROXY_LOG_LEVEL", "INFO").upper()
+YTDLP_CACHE = Path("/var/lib/ytproxy/yt_dlp_cache")
 
 def setup_logging():
     """Initialize logging with rotating file handler and optional console output."""
@@ -627,6 +628,7 @@ def fetch_channel_videos_ydl(channel_name, count, include_shorts):
         "extract_flat": False,
         "playlistend": count,
         "skip_download": True,
+        "cachedir": str(YTDLP_CACHE),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -742,7 +744,6 @@ def fetch_channel_videos(
     if cached:
         if now - cached["time"] < CHANNEL_CACHE_TIME:
             log.debug(f"CHANNEL_CACHE HIT: {channel_name}")
-
             return cached["videos"]
 
     # --------------------------------------------------------
@@ -755,7 +756,7 @@ def fetch_channel_videos(
             count,
             include_shorts
         )
-
+        log.debug(f"RSS succeeded for {channel_name}")
         return videos
 
     except Exception as e:
@@ -773,7 +774,7 @@ def fetch_channel_videos(
                 count,
                 include_shorts
             )
-
+            log.debug(f"yt-dlp succeeded for {channel_name}")
             return videos
 
         except Exception as e:
@@ -1042,6 +1043,7 @@ def get_stream_info(video_id, quality=None):
         "quiet": True,
         "no_warnings": True,
         "format": format_selector,
+        "cachedir": str(YTDLP_CACHE),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1305,6 +1307,12 @@ if __name__ == "__main__":
     HOST = os.getenv("YTPROXY_HOST", "0.0.0.0")
     PORT = int(os.getenv("YTPROXY_PORT", "8080"))
     BG_REFRESH = os.getenv("YTPROXY_BG_REFRESH", "no") == "yes"
+
+    try:
+        YTDLP_CACHE.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log.warning(f"Warning: Could not create cache directory {YTDLP_CACHE}: {e}\n")
+
     load_channel_id_cache()
     load_known_channels()
 
