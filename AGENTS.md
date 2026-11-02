@@ -72,9 +72,9 @@ ffprobe -v error -show_entries stream=codec_type,codec_name,width,height \
 
 ## Channel feeds
 
-- YouTube's RSS endpoint (`/feeds/videos.xml`) currently returns 404, so the
-  routes fall back to `fetch_channel_videos_ydl` with `extract_flat=True`
-  (fast, but no upload dates).
+- If YouTube's RSS endpoint (`/feeds/videos.xml`) returns 404, server the
+  cached feed, don't fall back to `fetch_channel_videos_ydl` because
+  Emby/Jellyfin would get confused which videos where already watched.
 - The background refresh worker uses `extract_flat=False` to capture upload
   dates for the disk cache.
 - Channel cache keys use the name as passed in (without a synthesized `@`);

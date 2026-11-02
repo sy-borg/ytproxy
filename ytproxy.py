@@ -851,7 +851,7 @@ def channel_m3u(channel):
                 channel,
                 count,
                 include_shorts,
-                True
+                False
             )
 
             for video in videos:
@@ -925,7 +925,7 @@ def channel_xml(channel):
                 channel,
                 count,
                 include_shorts,
-                True
+                False
             )
 
             channel_meta = get_channel_meta(channel, count, include_shorts)
