@@ -28,9 +28,11 @@ import subprocess
 import time
 import os
 import sys
+import select
 import threading
 import logging
 import logging.handlers
+import collections
 from urllib.parse import urlparse, parse_qs
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -280,7 +282,8 @@ def refresh_channels_worker():
                         channel,
                         count,
                         include_shorts,
-                        ydl_fallback=True
+                        ydl_fallback=True,
+                        fast=False
                     )
                     time.sleep(1)
 
@@ -484,6 +487,14 @@ STREAM_CACHE = {}
 # fallback if expire= is missing
 DEFAULT_STREAM_CACHE_TIME = 1800
 
+# FFmpeg streaming parameters
+FFMPEG_READ_TIMEOUT = 30_000_000   # microseconds (30s) for upstream reads
+FFMPEG_START_TIMEOUT = 30          # seconds to wait for the first output byte
+STREAM_CHUNK_SIZE = 64 * 1024      # small chunks keep playback latency low
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+)
+
 
 def cleanup_stream_cache():
     if not hasattr(cleanup_stream_cache, "cleanup_counter"):
@@ -612,8 +623,15 @@ def fetch_channel_videos_rss(channel_name, count, include_shorts):
     return videos
 
 
-def fetch_channel_videos_ydl(channel_name, count, include_shorts):
+def fetch_channel_videos_ydl(
+    channel_name,
+    count,
+    include_shorts,
+    fast=True
+):
     now = time.time()
+
+    original_channel_name = channel_name
 
     # Support both:
     #   Computerphile
@@ -625,7 +643,10 @@ def fetch_channel_videos_ydl(channel_name, count, include_shorts):
 
     ydl_opts = {
         "quiet": True,
-        "extract_flat": False,
+        # Flat extraction is much faster (well under a second) and still
+        # returns id/title/duration. Use full extraction only for the
+        # background cache refresh, which also needs upload dates.
+        "extract_flat": fast,
         "playlistend": count,
         "skip_download": True,
         "cachedir": str(YTDLP_CACHE),
@@ -703,7 +724,7 @@ def fetch_channel_videos_ydl(channel_name, count, include_shorts):
         reverse=True
     )
 
-    cache_key = f"{channel_name}:{count}:{include_shorts}"
+    cache_key = f"{original_channel_name}:{count}:{include_shorts}"
     # Store cache
     CHANNEL_CACHE[cache_key] = {
         "time": now,
@@ -711,7 +732,7 @@ def fetch_channel_videos_ydl(channel_name, count, include_shorts):
         "channel": channel,
     }
     save_channel_cache(
-        channel_name,
+        original_channel_name,
         count,
         include_shorts,
         videos,
@@ -725,7 +746,8 @@ def fetch_channel_videos(
     channel_name,
     count,
     include_shorts,
-    ydl_fallback
+    ydl_fallback,
+    fast=True
 ):
     now = time.time()
 
@@ -772,7 +794,8 @@ def fetch_channel_videos(
             videos = fetch_channel_videos_ydl(
                 channel_name,
                 count,
-                include_shorts
+                include_shorts,
+                fast=fast
             )
             log.debug(f"yt-dlp succeeded for {channel_name}")
             return videos
@@ -828,7 +851,7 @@ def channel_m3u(channel):
                 channel,
                 count,
                 include_shorts,
-                False
+                True
             )
 
             for video in videos:
@@ -877,6 +900,10 @@ def channel_xml(channel):
         request.args.get("shorts", "0") == "1"
     )
     quality = request.args.get("quality")
+    # The XML feed declares media:content as video/mp4, so point the URLs at
+    # the fragmented-MP4 endpoint by default. Emby/Jellyfin handle that far
+    # more reliably than MPEG-TS.
+    container = request.args.get("container", "mp4")
 
     base_url = request.host_url.rstrip("/")
 
@@ -898,7 +925,7 @@ def channel_xml(channel):
                 channel,
                 count,
                 include_shorts,
-                False
+                True
             )
 
             channel_meta = get_channel_meta(channel, count, include_shorts)
@@ -926,6 +953,11 @@ def channel_xml(channel):
                 if quality:
                     stream_url += (
                         escape(f"&quality={quality}")
+                    )
+
+                if container:
+                    stream_url += (
+                        escape(f"&container={container}")
                     )
 
                 thumbnail = video["thumbnail"]
@@ -1001,6 +1033,46 @@ def get_url_expiry(url):
     return int(time.time() + DEFAULT_STREAM_CACHE_TIME)
 
 
+def build_format_selector(quality=None):
+    """
+    Build the yt-dlp format selector.
+
+    YouTube's direct HTTPS media URLs (``*.googlevideo.com/videoplayback``)
+    are frequently answered with ``403 Forbidden`` when requested outside of
+    yt-dlp itself, because they now depend on browser TLS/JS fingerprints.
+    The HLS (``.m3u8``) variants of the same streams are still served, so we
+    prefer those and only fall back to the direct HTTPS formats.
+
+    yt-dlp's "bestvideo" is usually VP9 or AV1.  Remuxing those into MPEG-TS
+    or MP4 makes many players/Emby/Jellyfin fall back to transcoding, so we
+    still prefer H.264 (avc1) where it exists.
+    """
+
+    height = f"[height<={quality}]" if quality else ""
+
+    avc_hls = f"bestvideo[vcodec^=avc1]{height}[protocol^=m3u8]"
+    any_hls = f"bestvideo{height}[protocol^=m3u8]"
+    hls_audio = "bestaudio[protocol^=m3u8]"
+
+    avc_https = (
+        f"bestvideo[vcodec^=avc1]{height}"
+        f"+bestaudio[acodec^=mp4a]"
+    )
+    best_https = f"best{height}" if quality else "best"
+
+    return (
+        # HLS video + HLS audio (both AAC/H.264 where available).
+        f"{avc_hls}+{hls_audio}/"
+        f"{any_hls}+{hls_audio}/"
+        # HLS video with whatever audio works.
+        f"{avc_hls}+bestaudio/"
+        f"{any_hls}+bestaudio/"
+        # Direct HTTPS fallback (may be rejected with 403).
+        f"{avc_https}/"
+        f"{best_https}"
+    )
+
+
 def get_stream_info(video_id, quality=None):
     now = time.time()
 
@@ -1024,20 +1096,7 @@ def get_stream_info(video_id, quality=None):
         f"https://www.youtube.com/watch?v={video_id}"
     )
 
-    # YouTube's "bestvideo" is often VP9 (codec vp9) or AV1 (av01). Copying VP9/AV1 video into an MPEG-TS
-    # container produces a stream that most media servers and players don't recognize as directly playable —
-    # they'll fall back to transcoding. For maximum direct-play compatibility with Emby/Jellyfin,
-    # constrain yt-dlp to prefer H.264:
-    if quality:
-        format_selector = (
-            f"bestvideo[vcodec^=avc1][height<={quality}]"
-            f"+bestaudio[acodec^=mp4a]/"
-            f"best[height<={quality}]"
-        )
-    else:
-        format_selector = (
-            "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best"
-        )
+    format_selector = build_format_selector(quality)
 
     ydl_opts = {
         "quiet": True,
@@ -1079,6 +1138,7 @@ def get_stream_info(video_id, quality=None):
             stream = {
                 "mode": "ffmpeg-single",
                 "url": video_fmt["url"],
+                "http_headers": video_fmt.get("http_headers") or {},
                 "height": video_fmt.get("height"),
                 "protocol": video_fmt.get("protocol"),
                 "duration": info.get("duration") or -1,
@@ -1091,27 +1151,49 @@ def get_stream_info(video_id, quality=None):
                 "mode": "ffmpeg-dual",
                 "video_url": video_fmt["url"],
                 "audio_url": audio_fmt["url"],
+                "video_http_headers": video_fmt.get("http_headers") or {},
+                "audio_http_headers": audio_fmt.get("http_headers") or {},
                 "height": video_fmt.get("height"),
                 "protocol": video_fmt.get("protocol"),
                 "duration": info.get("duration") or -1,
                 "expires": min(video_expiry, audio_expiry),
             }
-        log.debug(f"Selected video codec: {video_fmt.get('vcodec')}")
+        log.debug(
+            f"Selected video codec: {video_fmt.get('vcodec')} "
+            f"({video_fmt.get('protocol')})"
+        )
 
     # --------------------------------------------------------
     # Progressive stream
     # --------------------------------------------------------
 
     else:
-        stream = {
-            "mode": "direct",
-            "url": info["url"],
-            "height": info.get("height"),
-            "ext": info.get("ext"),
-            "protocol": info.get("protocol"),
-            "duration": info.get("duration") or -1,
-            "expires": get_url_expiry(info["url"]),
-        }
+        protocol = info.get("protocol") or ""
+
+        if protocol.startswith("m3u8"):
+            # A muxed HLS format is a playlist, not a media file. Remux it
+            # through ffmpeg instead of proxying the playlist verbatim.
+            stream = {
+                "mode": "ffmpeg-single",
+                "url": info["url"],
+                "http_headers": info.get("http_headers") or {},
+                "height": info.get("height"),
+                "ext": info.get("ext"),
+                "protocol": protocol,
+                "duration": info.get("duration") or -1,
+                "expires": get_url_expiry(info["url"]),
+            }
+        else:
+            stream = {
+                "mode": "direct",
+                "url": info["url"],
+                "http_headers": info.get("http_headers") or {},
+                "height": info.get("height"),
+                "ext": info.get("ext"),
+                "protocol": protocol,
+                "duration": info.get("duration") or -1,
+                "expires": get_url_expiry(info["url"]),
+            }
 
     cleanup_stream_cache()
 
@@ -1152,30 +1234,61 @@ def watch():
     return stream_ffmpeg(stream, preferred_container)
 
 
-def proxy_direct(stream):
-    # directly proxy the original YouTube stream URL
+def build_upstream_headers(http_headers=None):
+    """Headers used when fetching a media URL from YouTube."""
+    http_headers = http_headers or {}
+
     headers = {
-        "User-Agent": request.headers.get(
-            "User-Agent",
-            "Mozilla/5.0"
-        )
+        "User-Agent": (
+            http_headers.get("User-Agent")
+            or request.headers.get("User-Agent")
+            or DEFAULT_USER_AGENT
+        ),
+        # Prevent transparent compression from mangling media bytes.
+        "Accept-Encoding": "identity",
     }
 
-    # Forward range requests
+    for key, value in http_headers.items():
+        if key.lower() in ("user-agent", "accept-encoding"):
+            continue
+        headers[key] = value
+
+    # Forward range requests so players can seek.
     if "Range" in request.headers:
         headers["Range"] = request.headers["Range"]
 
-    upstream = HTTP.get(
-        stream["url"],
-        headers=headers,
-        stream=True,
-        timeout=30,
-    )
+    return headers
+
+
+def proxy_direct(stream):
+    # directly proxy the original YouTube stream URL
+    headers = build_upstream_headers(stream.get("http_headers"))
+
+    try:
+        upstream = HTTP.get(
+            stream["url"],
+            headers=headers,
+            stream=True,
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        log.error(f"Failed to reach YouTube: {e}")
+        abort(502, f"Failed to reach YouTube: {e}")
+
+    if upstream.status_code >= 400:
+        log.error(
+            f"Upstream returned HTTP {upstream.status_code} "
+            f"for direct stream"
+        )
+        upstream.close()
+        abort(502, f"Upstream returned HTTP {upstream.status_code}")
 
     excluded = {
-        #"content-encoding",
-        #"transfer-encoding",
         "connection",
+        "transfer-encoding",
+        "keep-alive",
+        "proxy-connection",
+        "upgrade",
     }
 
     response_headers = {
@@ -1190,8 +1303,13 @@ def proxy_direct(stream):
             "video/mp4"
         )
     )
+    response_headers["Accept-Ranges"] = (
+        upstream.headers.get("Accept-Ranges", "bytes")
+    )
+    response_headers["Cache-Control"] = "no-cache"
 
     if request.method == "HEAD":
+        upstream.close()
         return Response(
             status=upstream.status_code,
             headers=response_headers,
@@ -1206,84 +1324,190 @@ def proxy_direct(stream):
     )
 
 
+def ffmpeg_input_args(url, http_headers=None):
+    """
+    Build the ffmpeg input options for a YouTube media URL.
+
+    ``-stimeout`` is deliberately not used: it is an RTSP-only option and
+    recent ffmpeg builds abort with "Unrecognized option 'stimeout'" before
+    doing any work.  ``-rw_timeout`` covers HTTP read timeouts instead.
+    """
+    http_headers = dict(http_headers or {})
+    user_agent = (
+        http_headers.pop("User-Agent", None)
+        or DEFAULT_USER_AGENT
+    )
+    header_lines = "".join(
+        f"{key}: {value}\r\n"
+        for key, value in http_headers.items()
+    )
+    header_lines += "Accept-Encoding: identity\r\n"
+
+    return [
+        "-user_agent", user_agent,
+        "-headers", header_lines,
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-rw_timeout", str(FFMPEG_READ_TIMEOUT),
+        "-i", url,
+    ]
+
+
 def stream_ffmpeg(stream, preferred_container):
     # ffmpeg remux
+
+    if preferred_container == "mp4":
+        # Serve fMP4 to browsers that lack MPEG-TS support
+        container_format = "mp4"
+        mov_flags = [
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof",
+        ]
+        mimetype = "video/mp4"
+    else:
+        container_format = "mpegts"
+        mov_flags = []
+        mimetype = "video/mp2t"
 
     if request.method == "HEAD":
         return Response(
             status=200,
-            mimetype="video/mp4",
+            mimetype=mimetype,
             headers={
                 "Cache-Control": "no-cache",
             },
         )
 
-    # Global / input options shared by all modes
-    base_cmd = [
+    cmd = [
         "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
         "-loglevel", "error",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
     ]
 
-    container_format = "mpegts"
-    mov_flags = ()
-    mimetype = "video/mp2t"
-
-    if preferred_container == "mp4":
-        # Serve fMP4 to browsers that lack TS support
-        container_format = "mp4"
-        mov_flags = "-movflags", "frag_keyframe+empty_moov"
-        mimetype = "video/mp4"
-
     if stream["mode"] == "ffmpeg-single":
-        cmd = base_cmd + [
-            "-i", stream["url"],
+        cmd += ffmpeg_input_args(
+            stream["url"],
+            stream.get("http_headers"),
+        )
+        cmd += [
             "-c", "copy",
             "-f", container_format,
-        ] + list(mov_flags) + ["pipe:1"]
+        ]
     else:  # ffmpeg-dual
-        cmd = base_cmd + [
-            "-i", stream["video_url"],
-            "-i", stream["audio_url"],
+        cmd += ffmpeg_input_args(
+            stream["video_url"],
+            stream.get("video_http_headers"),
+        )
+        cmd += ffmpeg_input_args(
+            stream["audio_url"],
+            stream.get("audio_http_headers"),
+        )
+        cmd += [
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
             "-f", container_format,
-        ] + list(mov_flags) + ["pipe:1"]
+        ]
+
+    cmd += mov_flags + ["pipe:1"]
 
     log.debug(f"Starting ffmpeg stream ({container_format}): {' '.join(cmd)}")
 
-    CHUNK_SIZE = 4 * 1024 * 1024      # 4 MiB
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+    except OSError as e:
+        log.error(f"Failed to start ffmpeg: {e}")
+        abort(500, f"Failed to start ffmpeg: {e}")
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        bufsize=CHUNK_SIZE,
-    )
+    stderr_lines = collections.deque(maxlen=50)
+
+    def drain_stderr():
+        try:
+            for line in iter(process.stderr.readline, b""):
+                text = line.decode("utf-8", "replace").strip()
+                if text:
+                    stderr_lines.append(text)
+        except Exception:
+            pass
+        finally:
+            try:
+                process.stderr.close()
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=drain_stderr,
+        daemon=True,
+        name="ffmpeg-stderr",
+    ).start()
+
+    def stop_process():
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+    # Wait for the first bytes before answering, so a failed ffmpeg run
+    # produces a real error instead of an empty 200 response.
+    try:
+        ready, _, _ = select.select(
+            [process.stdout],
+            [],
+            [],
+            FFMPEG_START_TIMEOUT,
+        )
+    except (OSError, ValueError):
+        ready = []
+
+    if not ready:
+        stop_process()
+        detail = " | ".join(stderr_lines) or "timed out"
+        log.error(f"ffmpeg produced no output: {detail}")
+        abort(504, f"ffmpeg produced no output: {detail}")
+
+    first_chunk = process.stdout.read(STREAM_CHUNK_SIZE)
+
+    if not first_chunk:
+        stop_process()
+        detail = " | ".join(stderr_lines) or "process exited"
+        log.error(f"ffmpeg failed: {detail}")
+        abort(502, f"ffmpeg failed: {detail}")
 
     def generate():
         try:
-            # Let ffmpeg produce valid stream from the start
+            yield first_chunk
+
             while True:
-                chunk = process.stdout.read(CHUNK_SIZE)
+                chunk = process.stdout.read(STREAM_CHUNK_SIZE)
                 if not chunk:
                     break
                 yield chunk
-
         finally:
-            process.kill()
-            process.wait()
+            stop_process()
+            detail = " | ".join(stderr_lines)
+            if detail:
+                log.error(f"ffmpeg: {detail}")
 
     return Response(
         generate(),
         mimetype=mimetype,
         headers={
             "Cache-Control": "no-cache",
+            "Content-Disposition": "inline",
         },
     )
 
