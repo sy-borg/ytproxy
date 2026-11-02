@@ -838,6 +838,7 @@ def channel_m3u(channel):
         request.args.get("shorts", "0") == "1"
     )
     quality = request.args.get("quality")
+    container = request.args.get("container")
 
     base_url = request.host_url
 
@@ -864,9 +865,12 @@ def channel_m3u(channel):
                     stream_url += (
                         f"&quality={quality}"
                     )
+                if container:
+                    stream_url += (
+                        f"&container={container}"
+                    )
 
                 visible_title = (
-                    #f"[{video['date']}] "
                     f"{video['title']}"
                 )
 
@@ -903,7 +907,7 @@ def channel_xml(channel):
     # The XML feed declares media:content as video/mp4, so point the URLs at
     # the fragmented-MP4 endpoint by default. Emby/Jellyfin handle that far
     # more reliably than MPEG-TS.
-    container = request.args.get("container", "mp4")
+    container = request.args.get("container")
 
     base_url = request.host_url.rstrip("/")
 
