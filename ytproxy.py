@@ -484,6 +484,15 @@ def get_channel_meta(channel_name, count, include_shorts):
 # ------------------------------------------------------------
 
 STREAM_CACHE = {}
+STREAM_CACHE_FILE = Path(
+    "/var/lib/ytproxy/stream_cache.json"
+)
+# One lock per (video_id, quality) so concurrent requests (Emby issues two
+# PlaybackInfo probes at once) share a single yt-dlp extraction instead of
+# resolving the same video twice and doubling the time to first byte.
+STREAM_LOCKS = {}
+STREAM_LOCKS_GUARD = threading.Lock()
+STREAM_CACHE_FILE_LOCK = threading.Lock()
 # fallback if expire= is missing
 DEFAULT_STREAM_CACHE_TIME = 1800
 
@@ -515,6 +524,79 @@ def cleanup_stream_cache():
 
     for k in expired:
         del STREAM_CACHE[k]
+
+
+def stream_cache_key(video_id, quality):
+    return f"{video_id}|{quality if quality is not None else 'none'}"
+
+
+def parse_stream_cache_key(key):
+    video_id, quality = key.rsplit("|", 1)
+
+    return video_id, (None if quality == "none" else int(quality))
+
+
+def save_stream_cache():
+    """Persist resolved stream URLs so a restart does not lose them.
+
+    The signed googlevideo URLs stay valid for hours (``expire=``), so after
+    a service restart players can start immediately instead of waiting for
+    another yt-dlp extraction, which is what makes the first Emby probe time
+    out.
+    """
+    now = time.time()
+
+    data = {
+        stream_cache_key(video_id, quality): stream
+        for (video_id, quality), stream in STREAM_CACHE.items()
+        if stream.get("expires", 0) > now
+    }
+
+    try:
+        with STREAM_CACHE_FILE_LOCK:
+            tmp = STREAM_CACHE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(STREAM_CACHE_FILE)
+    except Exception as e:
+        log.debug(f"Could not persist stream cache: {e}")
+
+
+def load_stream_cache():
+    try:
+        data = json.loads(STREAM_CACHE_FILE.read_text())
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        log.warning(f"Could not load stream cache: {e}")
+        return
+
+    now = time.time()
+    loaded = 0
+
+    for key, stream in data.items():
+        try:
+            video_id, quality = parse_stream_cache_key(key)
+        except Exception:
+            continue
+
+        if stream.get("expires", 0) > now:
+            STREAM_CACHE[(video_id, quality)] = stream
+            loaded += 1
+
+    if loaded:
+        log.info(f"Loaded {loaded} cached stream URLs")
+
+
+def invalidate_stream_cache(video_id, quality):
+    STREAM_CACHE.pop((video_id, quality), None)
+    save_stream_cache()
+
+
+def get_stream_lock(video_id, quality):
+    key = (video_id, quality)
+
+    with STREAM_LOCKS_GUARD:
+        return STREAM_LOCKS.setdefault(key, threading.Lock())
 
 
 # ------------------------------------------------------------
@@ -904,10 +986,11 @@ def channel_xml(channel):
         request.args.get("shorts", "0") == "1"
     )
     quality = request.args.get("quality")
-    # The XML feed declares media:content as video/mp4, so point the URLs at
-    # the fragmented-MP4 endpoint by default. Emby/Jellyfin handle that far
-    # more reliably than MPEG-TS.
+    # The URLs point at the MPEG-TS endpoint unless container=mp4 is asked
+    # for, so the declared media type has to match what /watch actually
+    # returns.  A wrong type confuses Emby/Jellyfin.
     container = request.args.get("container")
+    media_type = "video/mp4" if container == "mp4" else "video/mp2t"
 
     base_url = request.host_url.rstrip("/")
 
@@ -993,7 +1076,7 @@ def channel_xml(channel):
                 yield "<media:group>\n"
                 yield f"<media:title>{title}</media:title>\n"
                 yield f'<media:thumbnail url="{thumbnail}" />\n'
-                yield f'<media:content url="{stream_url}" type="video/mp4" '
+                yield f'<media:content url="{stream_url}" type="{media_type}" '
                 if "duration" in video and video["duration"] > 0:
                     yield f'duration="{video["duration"]}" '
                 yield "/>\n"
@@ -1077,13 +1160,16 @@ def build_format_selector(quality=None):
     )
 
 
-def get_stream_info(video_id, quality=None):
+def get_stream_info(video_id, quality=None, refresh=False):
     now = time.time()
 
     cache_key = (
         video_id,
         quality,
     )
+
+    if refresh:
+        STREAM_CACHE.pop(cache_key, None)
 
     cached = STREAM_CACHE.get(cache_key)
 
@@ -1096,6 +1182,31 @@ def get_stream_info(video_id, quality=None):
 
     log.debug(f"STREAM_CACHE MISS: {cache_key}")
 
+    # Serialise resolution of the same video.  Emby sends two PlaybackInfo
+    # requests at once; without this both would run yt-dlp, which roughly
+    # doubles the time until the first byte reaches ffprobe.
+    lock = get_stream_lock(video_id, quality)
+
+    with lock:
+        cached = STREAM_CACHE.get(cache_key)
+
+        if cached and cached["expires"] > time.time():
+            log.debug(f"STREAM_CACHE HIT after wait: {cache_key}")
+            return cached
+
+        started = time.time()
+
+        stream = resolve_stream_info(video_id, quality, cache_key)
+
+        log.info(
+            f"Resolved stream for {video_id} "
+            f"(quality={quality}) in {time.time() - started:.1f}s"
+        )
+
+    return stream
+
+
+def resolve_stream_info(video_id, quality, cache_key):
     youtube_url = (
         f"https://www.youtube.com/watch?v={video_id}"
     )
@@ -1202,10 +1313,20 @@ def get_stream_info(video_id, quality=None):
     cleanup_stream_cache()
 
     STREAM_CACHE[cache_key] = stream
+    save_stream_cache()
 
     log.debug(f"Selected stream: {stream}")
 
     return stream
+
+
+class StreamStartError(Exception):
+    """Raised when a stream could not be started for the client."""
+
+    def __init__(self, status, detail):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
 
 
 @app.route("/watch", methods=["GET", "HEAD"])
@@ -1222,20 +1343,42 @@ def watch():
     # Use when streaming to browser that don't support MPEG-TS
     preferred_container = request.args.get("container")
 
-    try:
-        stream = get_stream_info(
-            video_id,
-            quality,
-        )
+    # The first attempt after a cold start can fail (YouTube 403s, expired
+    # URLs, transient extraction errors).  Emby reports that as
+    # "NoCompatibleStream" and only works after a second try, so retry once
+    # with freshly resolved URLs.
+    attempts = 2
+    error = None
 
-    except Exception as e:
-        log.error(f"yt-dlp error for {video_id}: {e}")
-        abort(500, f"yt-dlp error: {e}")
+    for attempt in range(attempts):
+        try:
+            stream = get_stream_info(
+                video_id,
+                quality,
+                refresh=attempt > 0,
+            )
+        except Exception as e:
+            log.error(f"yt-dlp error for {video_id}: {e}")
+            error = StreamStartError(500, f"yt-dlp error: {e}")
+            continue
 
-    if stream["mode"] == "direct":
-        return proxy_direct(stream)
+        try:
+            if stream["mode"] == "direct":
+                return proxy_direct(stream)
 
-    return stream_ffmpeg(stream, preferred_container)
+            return stream_ffmpeg(stream, preferred_container)
+        except StreamStartError as e:
+            error = e
+            log.warning(
+                f"Could not start stream for {video_id} "
+                f"(attempt {attempt + 1}/{attempts}): {e.detail}"
+            )
+            invalidate_stream_cache(video_id, quality)
+
+    abort(
+        error.status if error else 500,
+        error.detail if error else f"Could not start stream for {video_id}",
+    )
 
 
 def build_upstream_headers(http_headers=None):
@@ -1277,7 +1420,7 @@ def proxy_direct(stream):
         )
     except requests.RequestException as e:
         log.error(f"Failed to reach YouTube: {e}")
-        abort(502, f"Failed to reach YouTube: {e}")
+        raise StreamStartError(502, f"Failed to reach YouTube: {e}")
 
     if upstream.status_code >= 400:
         log.error(
@@ -1285,7 +1428,10 @@ def proxy_direct(stream):
             f"for direct stream"
         )
         upstream.close()
-        abort(502, f"Upstream returned HTTP {upstream.status_code}")
+        raise StreamStartError(
+            502,
+            f"Upstream returned HTTP {upstream.status_code}",
+        )
 
     excluded = {
         "connection",
@@ -1421,6 +1567,8 @@ def stream_ffmpeg(stream, preferred_container):
 
     log.debug(f"Starting ffmpeg stream ({container_format}): {' '.join(cmd)}")
 
+    started = time.time()
+
     try:
         process = subprocess.Popen(
             cmd,
@@ -1430,7 +1578,7 @@ def stream_ffmpeg(stream, preferred_container):
         )
     except OSError as e:
         log.error(f"Failed to start ffmpeg: {e}")
-        abort(500, f"Failed to start ffmpeg: {e}")
+        raise StreamStartError(500, f"Failed to start ffmpeg: {e}")
 
     stderr_lines = collections.deque(maxlen=50)
 
@@ -1481,7 +1629,7 @@ def stream_ffmpeg(stream, preferred_container):
         stop_process()
         detail = " | ".join(stderr_lines) or "timed out"
         log.error(f"ffmpeg produced no output: {detail}")
-        abort(504, f"ffmpeg produced no output: {detail}")
+        raise StreamStartError(504, f"ffmpeg produced no output: {detail}")
 
     first_chunk = process.stdout.read(STREAM_CHUNK_SIZE)
 
@@ -1489,7 +1637,9 @@ def stream_ffmpeg(stream, preferred_container):
         stop_process()
         detail = " | ".join(stderr_lines) or "process exited"
         log.error(f"ffmpeg failed: {detail}")
-        abort(502, f"ffmpeg failed: {detail}")
+        raise StreamStartError(502, f"ffmpeg failed: {detail}")
+
+    log.debug(f"ffmpeg first output after {time.time() - started:.1f}s")
 
     def generate():
         try:
@@ -1543,6 +1693,7 @@ if __name__ == "__main__":
 
     load_channel_id_cache()
     load_known_channels()
+    load_stream_cache()
 
     log.info(f"Starting ytproxy on {HOST}:{PORT}")
 

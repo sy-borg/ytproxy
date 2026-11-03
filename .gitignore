@@ -6,3 +6,4 @@ src
 *.bak
 *.json
 *.xml
+__pycache__/

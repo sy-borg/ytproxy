@@ -53,11 +53,28 @@ ffprobe -v error -show_entries stream=codec_type,codec_name,width,height \
 - `container=mp4` produces fragmented MP4 (`video/mp4`); anything else produces
   MPEG-TS (`video/mp2t`). The stream is generated live, so seeking via `Range`
   only works on the direct/progressive path.
+- **Cold starts are expensive** (~3-4 s yt-dlp + ~2 s until ffmpeg's first
+  byte, more on slow machines). Emby reports `NoCompatibleStream` when its
+  `ffprobe` probe gets nothing usable; note that `ffprobe` exits **0** even
+  for HTTP 5xx, connection refused, or empty bodies, so Emby's "Process
+  exited with code 0" does not mean the probe worked. Mitigations already in
+  place:
+  - `STREAM_CACHE` is persisted to `/var/lib/ytproxy/stream_cache.json`
+    (loaded at startup, keyed `<video_id>|<quality>`), so restarts keep the
+    signed URLs.
+  - `get_stream_info` takes a per-(video,quality) lock, so the two
+    simultaneous PlaybackInfo probes share one extraction.
+  - `/watch` retries once with `refresh=True` when yt-dlp or ffmpeg fails to
+    start (transient 403s / expired URLs).
+- `/watch` logs `Resolved stream ... in Xs` at INFO (cache miss) and
+  `ffmpeg first output after Xs` at DEBUG; use these to diagnose probe
+  timeouts.
 
 ## Runtime paths and permissions
 
 - `/var/lib/ytproxy` is hardcoded: yt-dlp cache (`yt_dlp_cache`),
-  `channel_ids.json`, `known_channels.json`, `channels/`.
+  `channel_ids.json`, `known_channels.json`, `channels/`,
+  `stream_cache.json`.
 - `/var/log/ytproxy` is the default log dir, overridable with
   `YTPROXY_LOG_DIR`.
 - Running as a normal user without those dirs logs `Permission denied` for

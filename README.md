@@ -105,10 +105,6 @@ http://localhost:8080/channel/Computerphile.xml?count=20
 http://localhost:8080/channel/Computerphile.xml?count=20&shorts=1
 ```
 
-The generated XML points at MP4 streams by default. Override the container
-with `&container=` (for example `&container=mpegts`, or `&container=` to use
-the server default).
-
 ### Watch a video
 
 ```
@@ -154,16 +150,17 @@ http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080&container=mp4
 | `YTPROXY_LOG_LEVEL` | Log level (`DEBUG`, `INFO`, ...) | `INFO` |
 
 Persistent data is stored under `/var/lib/ytproxy` (yt-dlp cache, channel ID
-cache, channel video cache, known channels). The service user must be able
-to write there.
+cache, channel video cache, known channels, resolved stream URLs). The service
+user must be able to write there.
 
 ## Player notes
 
 - **mpv / VLC / Kodi**: use the `/watch` URL directly, or import the M3U
   playlist.
 - **Browsers**: add `container=mp4`.
-- **Jellyfin / Emby**: import the `.xml` feed; it already points at MP4
-  streams.
+- **Jellyfin / Emby**: import the `.xml` feed. It uses the same MPEG-TS
+  default as `/watch`; add `&container=mp4` to the feed URL if your setup
+  prefers MP4.
 - **IPTV clients**: import the `.m3u` playlist. MPEG-TS is used by default.
 
 ## Troubleshooting
@@ -189,6 +186,11 @@ Common issues:
 - **Seeking does not work with `container=mp4`** — the MP4/TS stream is
   produced live by `ffmpeg`, so it is not seekable. Direct (progressive)
   streams forward `Range` requests.
+- **Emby/Jellyfin says "No compatible stream" the first time** — their
+  `ffprobe` probe gives up while a cold start (yt-dlp + ffmpeg) is still
+  running. The proxy retries once with freshly resolved URLs; if it keeps
+  happening, check the `Resolved stream ... in Xs` log line and raise the
+  probe timeout on the media server side.
 
 Enable verbose logging:
 
