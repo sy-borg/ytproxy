@@ -188,9 +188,24 @@ Common issues:
   streams forward `Range` requests.
 - **Emby/Jellyfin says "No compatible stream" the first time** — their
   `ffprobe` probe gives up while a cold start (yt-dlp + ffmpeg) is still
-  running. The proxy retries once with freshly resolved URLs; if it keeps
-  happening, check the `Resolved stream ... in Xs` log line and raise the
-  probe timeout on the media server side.
+  running. The proxy retries once with freshly resolved URLs, and waits for a
+  full 64 KiB chunk before sending the response, because a tiny first chunk
+  (for example only the MPEG-TS PAT/PMT packets) makes `ffprobe` report no
+  streams.
+
+  To diagnose, look for these INFO lines in the log:
+
+  ```
+  Watch request: v=... quality=... container=... ua=... range=...
+  Resolved stream for ... (quality=..., mode=..., height=...) in Xs
+  Stream ... q=...: first output after Xs (65536 bytes, first=...)
+  Stream ... q=... ended after Xs: client disconnected|ffmpeg eof,
+      sent N bytes, ffmpeg rc=R
+  ```
+
+  If the probe disconnects before `first output`, the cold start is too slow
+  for the media server (pre-resolve the URL or raise its probe timeout). If
+  `ffmpeg eof` appears with an `stderr:` detail, the upstream stream failed.
 
 Enable verbose logging:
 

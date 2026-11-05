@@ -499,6 +499,7 @@ DEFAULT_STREAM_CACHE_TIME = 1800
 # FFmpeg streaming parameters
 FFMPEG_READ_TIMEOUT = 30_000_000   # microseconds (30s) for upstream reads
 FFMPEG_START_TIMEOUT = 30          # seconds to wait for the first output byte
+FIRST_CHUNK_TIMEOUT = 1            # seconds to fill the first chunk once data flows
 STREAM_CHUNK_SIZE = 64 * 1024      # small chunks keep playback latency low
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
@@ -1200,7 +1201,9 @@ def get_stream_info(video_id, quality=None, refresh=False):
 
         log.info(
             f"Resolved stream for {video_id} "
-            f"(quality={quality}) in {time.time() - started:.1f}s"
+            f"(quality={quality}, mode={stream.get('mode')}, "
+            f"height={stream.get('height')}) "
+            f"in {time.time() - started:.1f}s"
         )
 
     return stream
@@ -1343,6 +1346,13 @@ def watch():
     # Use when streaming to browser that don't support MPEG-TS
     preferred_container = request.args.get("container")
 
+    log.info(
+        f"Watch request: v={video_id} quality={quality} "
+        f"container={preferred_container or '-'} "
+        f"ua={request.headers.get('User-Agent', '-')!r} "
+        f"range={request.headers.get('Range', '-')!r}"
+    )
+
     # The first attempt after a cold start can fail (YouTube 403s, expired
     # URLs, transient extraction errors).  Emby reports that as
     # "NoCompatibleStream" and only works after a second try, so retry once
@@ -1366,7 +1376,12 @@ def watch():
             if stream["mode"] == "direct":
                 return proxy_direct(stream)
 
-            return stream_ffmpeg(stream, preferred_container)
+            return stream_ffmpeg(
+                stream,
+                preferred_container,
+                video_id,
+                quality,
+            )
         except StreamStartError as e:
             error = e
             log.warning(
@@ -1504,8 +1519,10 @@ def ffmpeg_input_args(url, http_headers=None):
     ]
 
 
-def stream_ffmpeg(stream, preferred_container):
+def stream_ffmpeg(stream, preferred_container, video_id=None, quality=None):
     # ffmpeg remux
+
+    label = f"{video_id or '?'} q={quality}"
 
     if preferred_container == "mp4":
         # Serve fMP4 to browsers that lack MPEG-TS support
@@ -1615,46 +1632,119 @@ def stream_ffmpeg(stream, preferred_container):
 
     # Wait for the first bytes before answering, so a failed ffmpeg run
     # produces a real error instead of an empty 200 response.
-    try:
-        ready, _, _ = select.select(
-            [process.stdout],
-            [],
-            [],
-            FFMPEG_START_TIMEOUT,
-        )
-    except (OSError, ValueError):
-        ready = []
+    def read_first_chunk():
+        """Wait for the first byte, then try to fill one full chunk.
 
-    if not ready:
-        stop_process()
-        detail = " | ".join(stderr_lines) or "timed out"
-        log.error(f"ffmpeg produced no output: {detail}")
-        raise StreamStartError(504, f"ffmpeg produced no output: {detail}")
+        A pipe read can return fewer bytes than requested (sometimes only the
+        PAT/PMT packets).  A tiny first chunk is useless for ffprobe: it
+        reports no streams, and Emby then says ``NoCompatibleStream``.
+        """
+        buf = bytearray()
+        overall_deadline = started + FFMPEG_START_TIMEOUT
+        fill_deadline = None
 
-    first_chunk = process.stdout.read(STREAM_CHUNK_SIZE)
+        while len(buf) < STREAM_CHUNK_SIZE:
+            deadline = overall_deadline
+
+            if fill_deadline is not None:
+                deadline = min(deadline, fill_deadline)
+
+            wait = deadline - time.time()
+
+            if wait <= 0:
+                break
+
+            try:
+                ready, _, _ = select.select(
+                    [process.stdout],
+                    [],
+                    [],
+                    wait,
+                )
+            except (OSError, ValueError):
+                break
+
+            if not ready:
+                break
+
+            chunk = process.stdout.read(STREAM_CHUNK_SIZE - len(buf))
+
+            if not chunk:
+                break
+
+            buf += chunk
+
+            if fill_deadline is None:
+                # Data is flowing: do not spend forever accumulating a chunk.
+                fill_deadline = time.time() + FIRST_CHUNK_TIMEOUT
+
+        return bytes(buf)
+
+    first_chunk = read_first_chunk()
 
     if not first_chunk:
+        still_running = process.poll() is None
         stop_process()
-        detail = " | ".join(stderr_lines) or "process exited"
-        log.error(f"ffmpeg failed: {detail}")
+        detail = " | ".join(stderr_lines) or "timed out"
+        log.error(f"ffmpeg produced no output for {label}: {detail}")
+
+        if still_running:
+            raise StreamStartError(504, f"ffmpeg produced no output: {detail}")
+
         raise StreamStartError(502, f"ffmpeg failed: {detail}")
 
-    log.debug(f"ffmpeg first output after {time.time() - started:.1f}s")
+    log.info(
+        f"Stream {label}: first output after "
+        f"{time.time() - started:.1f}s ({len(first_chunk)} bytes, "
+        f"first={first_chunk[:8].hex()})"
+    )
+
+    stream_started = time.time()
+    sent = 0
+    end_reason = "ffmpeg eof"
 
     def generate():
+        nonlocal sent, end_reason
+
         try:
             yield first_chunk
+            sent += len(first_chunk)
 
             while True:
                 chunk = process.stdout.read(STREAM_CHUNK_SIZE)
+
                 if not chunk:
                     break
+
+                sent += len(chunk)
                 yield chunk
+        except GeneratorExit:
+            end_reason = "client disconnected"
+            raise
         finally:
             stop_process()
+
             detail = " | ".join(stderr_lines)
+            duration = time.time() - stream_started
+            summary = (
+                f"Stream {label} ended after {duration:.1f}s: "
+                f"{end_reason}, sent {sent} bytes, "
+                f"ffmpeg rc={process.returncode}"
+            )
+
             if detail:
-                log.error(f"ffmpeg: {detail}")
+                summary += f", stderr: {detail}"
+
+            # Short/aborted streams are the interesting ones (Emby probe
+            # failures); do not spam INFO for normal full-length playback.
+            if (
+                duration < 30
+                or process.returncode not in (0, None)
+                or sent < 1024 * 1024
+            ):
+                log.info(summary)
+            else:
+                log.debug(summary)
 
     return Response(
         generate(),

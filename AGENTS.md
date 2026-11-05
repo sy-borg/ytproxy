@@ -66,9 +66,23 @@ ffprobe -v error -show_entries stream=codec_type,codec_name,width,height \
     simultaneous PlaybackInfo probes share one extraction.
   - `/watch` retries once with `refresh=True` when yt-dlp or ffmpeg fails to
     start (transient 403s / expired URLs).
-- `/watch` logs `Resolved stream ... in Xs` at INFO (cache miss) and
-  `ffmpeg first output after Xs` at DEBUG; use these to diagnose probe
-  timeouts.
+  - `stream_ffmpeg` buffers the first chunk (up to `STREAM_CHUNK_SIZE`, 64 KiB)
+    before returning the `Response`. A short pipe read may contain only the
+    PAT/PMT packets; a 376-byte TS sample makes `ffprobe` report an empty
+    `streams` array with rc 0, which is exactly how Emby ends up at
+    `NoCompatibleStream`. `FIRST_CHUNK_TIMEOUT` (1 s) stops that buffering once
+    data starts flowing.
+- Diagnostics are at INFO so they survive the default log level:
+  - `Watch request: v=... quality=... container=... ua=... range=...`
+  - `Resolved stream for ... (quality=..., mode=..., height=...) in Xs`
+  - `Stream <id> q=<q>: first output after Xs (N bytes, first=<hex>)`
+  - `Stream <id> q=<q> ended after Xs: <client disconnected|ffmpeg eof>,
+    sent N bytes, ffmpeg rc=R[, stderr: ...]` (full-length successful
+    playback drops to DEBUG).
+  Use these to tell a too-slow cold start (client disconnects before first
+  output) from an upstream failure (`ffmpeg eof` plus stderr). Note that
+  `ffprobe` exits **0** for HTTP 5xx, refused connections and empty/tiny
+  bodies, so an exit code of 0 proves nothing.
 
 ## Runtime paths and permissions
 
