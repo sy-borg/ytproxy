@@ -148,6 +148,7 @@ http://localhost:8080/watch?v=dQw4w9WgXcQ&quality=1080&container=mp4
 | `YTPROXY_BG_REFRESH` | `yes` enables the background channel refresh worker | `no` |
 | `YTPROXY_LOG_DIR` | Log directory | `/var/log/ytproxy` |
 | `YTPROXY_LOG_LEVEL` | Log level (`DEBUG`, `INFO`, ...) | `INFO` |
+| `YTPROXY_PREWARM` | Resolve feed videos in the background so the first playback is fast | `yes` |
 
 Persistent data is stored under `/var/lib/ytproxy` (yt-dlp cache, channel ID
 cache, channel video cache, known channels, resolved stream URLs). The service
@@ -187,11 +188,15 @@ Common issues:
   produced live by `ffmpeg`, so it is not seekable. Direct (progressive)
   streams forward `Range` requests.
 - **Emby/Jellyfin says "No compatible stream" the first time** — their
-  `ffprobe` probe gives up while a cold start (yt-dlp + ffmpeg) is still
-  running. The proxy retries once with freshly resolved URLs, and waits for a
-  full 64 KiB chunk before sending the response, because a tiny first chunk
-  (for example only the MPEG-TS PAT/PMT packets) makes `ffprobe` report no
-  streams.
+  playback request gives up after roughly six seconds while a cold start
+  (yt-dlp ~3 s + ffmpeg ~2–3 s) is still running. The proxy now:
+  - pre-resolves the videos of every channel feed it serves
+    (`YTPROXY_PREWARM=yes`, the default) in a background worker, so playback
+    only waits for ffmpeg;
+  - retries once with freshly resolved URLs;
+  - waits for a full 64 KiB chunk before sending the response, because a tiny
+    first chunk (for example only the MPEG-TS PAT/PMT packets) makes
+    `ffprobe` report no streams.
 
   To diagnose, look for these INFO lines in the log:
 

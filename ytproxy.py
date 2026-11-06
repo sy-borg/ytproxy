@@ -938,6 +938,8 @@ def channel_m3u(channel):
                 False
             )
 
+            prewarm_streams(videos, quality)
+
             for video in videos:
                 stream_url = (
                     f"{base_url}"
@@ -1015,6 +1017,8 @@ def channel_xml(channel):
                 include_shorts,
                 False
             )
+
+            prewarm_streams(videos, quality)
 
             channel_meta = get_channel_meta(channel, count, include_shorts)
             if channel_meta is not None:
@@ -1207,6 +1211,75 @@ def get_stream_info(video_id, quality=None, refresh=False):
         )
 
     return stream
+
+
+# Warm the stream cache for videos that appear in a channel feed.  Emby and
+# Jellyfin probe /watch with ffprobe before playback and give up after a few
+# seconds; a cold start costs yt-dlp's extraction (~3s) plus ffmpeg's first
+# byte (~2-3s), which is just too slow.  Feed fetches happen well before the
+# user presses play, so resolving there leaves only the ffmpeg part.
+PREWARM_LIMIT = 10
+PREWARM_CONCURRENCY = 2
+PREWARM_INFLIGHT = set()
+PREWARM_GUARD = threading.Lock()
+PREWARM_SLOTS = threading.Semaphore(PREWARM_CONCURRENCY)
+
+
+def prewarm_streams(videos, quality):
+    if os.getenv("YTPROXY_PREWARM", "yes") != "yes":
+        return
+
+    try:
+        quality = int(quality) if quality is not None else None
+    except (TypeError, ValueError):
+        quality = None
+
+    pending = []
+
+    for video in videos[:PREWARM_LIMIT]:
+        video_id = video.get("id")
+
+        if not video_id:
+            continue
+
+        key = (video_id, quality)
+
+        with PREWARM_GUARD:
+            if key in PREWARM_INFLIGHT:
+                continue
+
+            PREWARM_INFLIGHT.add(key)
+
+        pending.append(key)
+
+    if not pending:
+        return
+
+    log.debug(f"Prewarming {len(pending)} stream(s) for quality={quality}")
+
+    def run():
+        for video_id, video_quality in pending:
+            try:
+                # A guide refresh can fetch many feeds at once; do not start
+                # one yt-dlp run per feed.
+                with PREWARM_SLOTS:
+                    get_stream_info(video_id, video_quality)
+            except Exception as e:
+                log.debug(
+                    f"Prewarm failed for {video_id} "
+                    f"(quality={video_quality}): {e}"
+                )
+            finally:
+                with PREWARM_GUARD:
+                    PREWARM_INFLIGHT.discard(
+                        (video_id, video_quality)
+                    )
+
+    threading.Thread(
+        target=run,
+        daemon=True,
+        name="stream-prewarm",
+    ).start()
 
 
 def resolve_stream_info(video_id, quality, cache_key):

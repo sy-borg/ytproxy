@@ -66,6 +66,13 @@ ffprobe -v error -show_entries stream=codec_type,codec_name,width,height \
     simultaneous PlaybackInfo probes share one extraction.
   - `/watch` retries once with `refresh=True` when yt-dlp or ffmpeg fails to
     start (transient 403s / expired URLs).
+  - Channel feed handlers call `prewarm_streams(videos, quality)` before
+    streaming the feed. A background worker (max 2 concurrent yt-dlp runs,
+    `PREWARM_LIMIT` = 10 newest videos, disabled with
+    `YTPROXY_PREWARM=no`) puts the resolved URLs into `STREAM_CACHE` when
+    Emby/Jellyfin refreshes its tuner/guide, which is usually well before the
+    user presses play. Only the ~2-3 s ffmpeg start remains on the first
+    playback. `PREWARM_INFLIGHT` deduplicates feeds fetched concurrently.
   - `stream_ffmpeg` buffers the first chunk (up to `STREAM_CHUNK_SIZE`, 64 KiB)
     before returning the `Response`. A short pipe read may contain only the
     PAT/PMT packets; a 376-byte TS sample makes `ffprobe` report an empty
@@ -98,7 +105,8 @@ ffprobe -v error -show_entries stream=codec_type,codec_name,width,height \
 ## Environment
 
 `YTPROXY_HOST` (default `0.0.0.0`), `YTPROXY_PORT` (default `8080`),
-`YTPROXY_BG_REFRESH=yes`, `YTPROXY_LOG_DIR`, `YTPROXY_LOG_LEVEL`.
+`YTPROXY_BG_REFRESH=yes`, `YTPROXY_LOG_DIR`, `YTPROXY_LOG_LEVEL`,
+`YTPROXY_PREWARM` (default `yes`; set `no` to disable feed pre-resolution).
 `ytproxy.service` overrides host/port to `127.0.0.1:8090`.
 
 ## Channel feeds
